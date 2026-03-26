@@ -1,0 +1,70 @@
+[project]
+name = "tinyinterp"
+version = "0.1.0"
+description = "Minimal activation access and intervention wrapper for PyTorch models."
+requires-python = ">=3.11"
+dependencies = [
+    "torch>=2.0",
+]
+
+[project.optional-dependencies]
+transformers = [
+    "transformers>=4.30",
+]
+server = [
+    "pyzmq>=25",
+]
+
+[dependency-groups]
+dev = [
+    "mypy>=1.6",
+    "pre-commit>=3.5",
+    "pytest>=7.2",
+    "ruff>=0.1.0",
+]
+
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["tinyinterp"]
+include-package-data = true
+
+[tool.setuptools.package-data]
+tinyinterp = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+norecursedirs = [
+  "extra",
+  ".hypothesis",
+  ".git",
+]
+filterwarnings = [
+  "ignore:Failed to initialize NumPy:UserWarning",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["A", "B", "E", "F", "I", "UP"]
+
+[tool.ruff.lint.per-file-ignores]
+"tinyinterp/model.py" = ["A002"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+packages = ["tinyinterp"]
+warn_unused_configs = true
+check_untyped_defs = true
+explicit_package_bases = true
+warn_unreachable = true
+warn_redundant_casts = true
+strict_equality = true
+warn_unused_ignores = true
