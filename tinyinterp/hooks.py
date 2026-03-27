@@ -16,6 +16,10 @@ from .debug import log_hook_event
 MapFn = Callable[[torch.Tensor], torch.Tensor]
 
 
+class _EarlyStop(Exception):
+    """Internal control-flow exception used for capture-only early stop."""
+
+
 class HookState:
     """Mutable per-model state shared by all permanent hooks."""
 
@@ -26,6 +30,9 @@ class HookState:
         "_map_fns",
         "_buffers",
         "_handles",
+        "_stop_enabled",
+        "_stop_seen",
+        "_remaining_gets",
         "grad",
     )
 
@@ -36,6 +43,9 @@ class HookState:
         self._map_fns: list[MapFn | None] = []
         self._buffers: list[torch.Tensor | None] = []
         self._handles: list[RemovableHandle] = []
+        self._stop_enabled = False
+        self._stop_seen: list[bool] = []
+        self._remaining_gets = 0
         self.grad = False
 
     @property
@@ -53,6 +63,7 @@ class HookState:
         self._get_flags.append(False)
         self._map_fns.append(None)
         self._buffers.append(None)
+        self._stop_seen.append(False)
         self._handles.append(module.register_forward_hook(self._make_hook(path, sid)))
 
     def sid_for(self, module: nn.Module) -> int:
@@ -64,12 +75,20 @@ class HookState:
         map_dict: dict[Any, MapFn],
         *,
         grad: bool,
+        stop_at_last_get: bool = False,
     ) -> None:
         self.grad = grad
+        self._stop_enabled = stop_at_last_get
+        self._remaining_gets = 0
         for proxy in get_proxies:
-            self._get_flags[self.sid_for(proxy._module)] = True
+            sid = self.sid_for(proxy._module)
+            if not self._get_flags[sid]:
+                self._remaining_gets += 1
+            self._get_flags[sid] = True
         for proxy, fn in map_dict.items():
             self._map_fns[self.sid_for(proxy._module)] = fn
+        if self._remaining_gets == 0:
+            self._stop_enabled = False
 
     def collect_and_deactivate(self, *, strict: bool) -> dict[int, torch.Tensor]:
         captured: dict[int, torch.Tensor] = {}
@@ -94,6 +113,9 @@ class HookState:
             self._get_flags[sid] = False
             self._map_fns[sid] = None
             self._buffers[sid] = None
+            self._stop_seen[sid] = False
+        self._stop_enabled = False
+        self._remaining_gets = 0
         self.grad = False
 
     def _make_hook(
@@ -123,6 +145,12 @@ class HookState:
 
             if debug >= 4:
                 log_hook_event(path, sid=sid, get=get_flag, map_fn=map_fn, activation=activation)
+
+            if self._stop_enabled and get_flag and not self._stop_seen[sid]:
+                self._stop_seen[sid] = True
+                self._remaining_gets -= 1
+                if self._remaining_gets == 0:
+                    raise _EarlyStop
 
             if map_fn is None:
                 return output

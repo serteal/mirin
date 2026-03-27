@@ -7,10 +7,12 @@ from threading import Lock
 _COUNTER_FIELDS = (
     "calls",
     "forward_passes",
+    "total_time_ns",
     "forward_time_ns",
     "hook_overhead_ns",
     "activations_captured",
     "activations_bytes",
+    "early_stops",
     "buffer_pool_hits",
     "buffer_pool_misses",
     "maps_applied",
@@ -25,10 +27,12 @@ class _Counters:
 
     calls: int
     forward_passes: int
+    total_time_ns: int
     forward_time_ns: int
     hook_overhead_ns: int
     activations_captured: int
     activations_bytes: int
+    early_stops: int
     buffer_pool_hits: int
     buffer_pool_misses: int
     maps_applied: int
@@ -57,10 +61,12 @@ class _Counters:
                 "tinyinterp counters:",
                 f"  calls:                 {self.calls}",
                 f"  forward_passes:        {self.forward_passes}",
+                f"  total_time:            {self.total_time_ns / 1e6:.3f}ms",
                 f"  forward_time:          {self.forward_time_ns / 1e6:.3f}ms",
                 f"  hook_overhead:         {self.hook_overhead_ns / 1e6:.3f}ms",
                 f"  activations_captured:  {self.activations_captured}",
                 f"  activations_bytes:     {self.activations_bytes}",
+                f"  early_stops:           {self.early_stops}",
                 f"  batch_groups:          {self.batch_groups}",
                 f"  batch_fusions:         {self.batch_fusions}",
             ]

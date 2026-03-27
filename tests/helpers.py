@@ -21,6 +21,56 @@ class FakeOutput:
         return (self.logits,)[index]
 
 
+class FakeTokenizer:
+    """Tiny tokenizer with text and chat-template support for server tests."""
+
+    pad_token_id = 0
+    eos_token_id = 2
+
+    def __call__(
+        self,
+        text: str | list[str],
+        *,
+        return_tensors: str = "pt",
+    ) -> dict[str, torch.Tensor]:
+        if return_tensors != "pt":
+            raise ValueError("FakeTokenizer only supports return_tensors='pt'.")
+        texts = [text] if isinstance(text, str) else list(text)
+        rows: list[list[int]] = []
+        for item in texts:
+            encoded = [1]
+            encoded.extend(((ord(char) % 11) + 3) for char in item)
+            rows.append(encoded[:16])
+        max_len = max(len(row) for row in rows)
+        input_ids = torch.full(
+            (len(rows), max_len),
+            self.pad_token_id,
+            dtype=torch.long,
+        )
+        attention_mask = torch.zeros_like(input_ids)
+        for idx, row in enumerate(rows):
+            input_ids[idx, : len(row)] = torch.tensor(row, dtype=torch.long)
+            attention_mask[idx, : len(row)] = 1
+        return {"input_ids": input_ids, "attention_mask": attention_mask}
+
+    def apply_chat_template(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        tokenize: bool = False,
+        add_generation_prompt: bool = False,
+    ) -> str | torch.Tensor:
+        rendered = "\n".join(
+            f"{message.get('role', 'user')}: {message.get('content', '')}"
+            for message in messages
+        )
+        if add_generation_prompt:
+            rendered = f"{rendered}\nassistant:"
+        if tokenize:
+            return self(rendered)["input_ids"][0]
+        return rendered
+
+
 def _reshape_heads(tensor: torch.Tensor, n_heads: int) -> torch.Tensor:
     d_head = tensor.shape[-1] // n_heads
     return tensor.view(*tensor.shape[:-1], n_heads, d_head)
@@ -38,8 +88,8 @@ def _attention(
     return context, weights
 
 
-class FakeGpt2Attention(nn.Module):
-    """Tiny GPT-2 style attention with combined QKV projection."""
+class FakeDecoderAttention(nn.Module):
+    """Tiny decoder-style attention with combined QKV projection."""
 
     supports_attention_pattern = True
 
@@ -92,8 +142,8 @@ class FakeLlamaAttention(nn.Module):
         return attn_out, (weights if output_attentions else None)
 
 
-class FakeGpt2Mlp(nn.Module):
-    """Tiny GPT-2 style MLP with c_fc/c_proj."""
+class FakeDecoderMlp(nn.Module):
+    """Tiny decoder-style MLP with c_fc/c_proj."""
 
     def __init__(self, width: int) -> None:
         super().__init__()
@@ -122,13 +172,13 @@ class FakeLlamaMlp(nn.Module):
         return cast(torch.Tensor, self.down_proj(gated * up))
 
 
-class Gpt2Block(nn.Module):
-    """Tiny GPT-2 shaped block with direct attention and MLP children."""
+class DecoderBlock(nn.Module):
+    """Tiny decoder-style block with direct attention and MLP children."""
 
     def __init__(self, width: int, n_heads: int) -> None:
         super().__init__()
-        self.attn = FakeGpt2Attention(width, n_heads)
-        self.mlp = FakeGpt2Mlp(width)
+        self.attn = FakeDecoderAttention(width, n_heads)
+        self.mlp = FakeDecoderMlp(width)
         self.fail = False
 
     def forward(
@@ -167,18 +217,18 @@ class LlamaBlock(nn.Module):
         return hidden_states
 
 
-class FakeGpt2Backbone(nn.Module):
-    """Tiny GPT-2 style backbone with a typed block stack."""
+class FakeDecoderBackbone(nn.Module):
+    """Tiny decoder-style backbone with a typed block stack."""
 
     h: nn.ModuleList
 
     def __init__(self, width: int, n_layers: int, n_heads: int) -> None:
         super().__init__()
-        self.h = nn.ModuleList(Gpt2Block(width, n_heads) for _ in range(n_layers))
+        self.h = nn.ModuleList(DecoderBlock(width, n_heads) for _ in range(n_layers))
 
 
-class FakeGpt2Model(nn.Module):
-    """Tiny GPT-2 shaped model with ``transformer.h`` blocks."""
+class FakeDecoderModel(nn.Module):
+    """Tiny decoder-style model with ``transformer.h`` blocks."""
 
     def __init__(
         self,
@@ -190,7 +240,7 @@ class FakeGpt2Model(nn.Module):
     ) -> None:
         super().__init__()
         self.embed = nn.Embedding(vocab_size, width)
-        self.transformer = FakeGpt2Backbone(width, n_layers, n_heads)
+        self.transformer = FakeDecoderBackbone(width, n_layers, n_heads)
         self.lm_head = nn.Linear(width, vocab_size, bias=False)
         self.config = SimpleNamespace(
             n_layer=n_layers,
@@ -205,6 +255,23 @@ class FakeGpt2Model(nn.Module):
         for block in self.transformer.h:
             hidden_states = block(hidden_states, output_attentions=output_attentions)[0]
         return FakeOutput(logits=self.lm_head(hidden_states))
+
+    def generate(
+        self,
+        input_ids: torch.Tensor,
+        *,
+        attention_mask: torch.Tensor | None = None,
+        max_new_tokens: int = 1,
+        do_sample: bool = False,
+        use_cache: bool = False,
+    ) -> torch.Tensor:
+        del attention_mask, do_sample, use_cache
+        tokens = input_ids.clone()
+        for _ in range(max_new_tokens):
+            logits = self(tokens).logits
+            next_token = logits[:, -1].argmax(dim=-1, keepdim=True)
+            tokens = torch.cat([tokens, next_token], dim=1)
+        return tokens
 
 
 class FakeLlamaBackbone(nn.Module):
@@ -246,6 +313,23 @@ class FakeLlamaModel(nn.Module):
         for block in self.model.layers:
             hidden_states = block(hidden_states, output_attentions=output_attentions)
         return FakeOutput(logits=self.lm_head(hidden_states))
+
+    def generate(
+        self,
+        input_ids: torch.Tensor,
+        *,
+        attention_mask: torch.Tensor | None = None,
+        max_new_tokens: int = 1,
+        do_sample: bool = False,
+        use_cache: bool = False,
+    ) -> torch.Tensor:
+        del attention_mask, do_sample, use_cache
+        tokens = input_ids.clone()
+        for _ in range(max_new_tokens):
+            logits = self(tokens).logits
+            next_token = logits[:, -1].argmax(dim=-1, keepdim=True)
+            tokens = torch.cat([tokens, next_token], dim=1)
+        return tokens
 
 
 def get_module(model: nn.Module, path: str) -> nn.Module:

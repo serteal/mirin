@@ -177,7 +177,7 @@ $ DEBUG=2 python3 my_script.py
 
 #### DEBUG=3 — "What is the planner doing?"
 
-Shows: decisions made by `ti.batch()` and `model.stream()`.
+Shows: decisions made by `ti.batch()`.
 
 ```
 $ DEBUG=3 python3 my_script.py

@@ -1,4 +1,4 @@
-"""Optional integration tests against tiny HuggingFace models."""
+"""Optional integration tests against tiny HuggingFace model families."""
 
 from __future__ import annotations
 
@@ -19,59 +19,79 @@ transformers = pytest.importorskip(
     reason="Install optional test dependency with `uv sync --extra transformers`.",
 )
 
-GPT2Config = transformers.GPT2Config
-GPT2LMHeadModel = transformers.GPT2LMHeadModel
-LlamaConfig = transformers.LlamaConfig
-LlamaForCausalLM = transformers.LlamaForCausalLM
+AutoConfig = transformers.AutoConfig
+AutoModelForCausalLM = transformers.AutoModelForCausalLM
+Gemma3Config = transformers.Gemma3Config
+Gemma3TextConfig = transformers.Gemma3TextConfig
+Qwen3_5TextConfig = transformers.Qwen3_5TextConfig
+
+LLAMA31_MODEL_NAME = "meta-llama/Llama-3.1-8B-Instruct"
+GEMMA3_MODEL_NAME = "google/gemma-3-4b-it"
+QWEN35_MODEL_NAME = "Qwen/Qwen3.5-4B"
 
 
-def _build_gpt2() -> tuple[torch.nn.Module, dict[str, Any]]:
-    config = GPT2Config(
-        vocab_size=32,
-        n_positions=16,
-        n_ctx=16,
-        n_embd=16,
-        n_layer=2,
-        n_head=2,
-        bos_token_id=1,
-        eos_token_id=2,
-        use_cache=False,
-        attn_implementation="eager",
-    )
-    model = GPT2LMHeadModel(config)
-    model.eval()
-    inputs = {
+def _tiny_inputs() -> dict[str, torch.Tensor]:
+    return {
         "input_ids": torch.tensor([[1, 2, 3, 4]], dtype=torch.long),
         "attention_mask": torch.ones((1, 4), dtype=torch.long),
     }
-    return model, inputs
 
 
-def _build_llama() -> tuple[torch.nn.Module, dict[str, Any]]:
-    config = LlamaConfig(
-        vocab_size=32,
+def _build_llama31() -> tuple[torch.nn.Module, dict[str, Any]]:
+    config = AutoConfig.from_pretrained(LLAMA31_MODEL_NAME)
+    _configure_text_config(config)
+    model = AutoModelForCausalLM.from_config(config)
+    model.eval()
+    return model, _tiny_inputs()
+
+
+def _build_gemma3() -> tuple[torch.nn.Module, dict[str, Any]]:
+    config = Gemma3Config(
+        text_config=Gemma3TextConfig(
+            vocab_size=64,
+            hidden_size=16,
+            intermediate_size=32,
+            num_hidden_layers=2,
+            num_attention_heads=2,
+            num_key_value_heads=2,
+            head_dim=8,
+            max_position_embeddings=32,
+            bos_token_id=1,
+            eos_token_id=2,
+            pad_token_id=0,
+            use_cache=False,
+            attn_implementation="eager",
+            layer_types=["full_attention", "full_attention"],
+        )
+    )
+    model = AutoModelForCausalLM.from_config(config)
+    model.eval()
+    return model, _tiny_inputs()
+
+
+def _build_qwen35() -> tuple[torch.nn.Module, dict[str, Any]]:
+    config = Qwen3_5TextConfig(
+        vocab_size=64,
         hidden_size=16,
         intermediate_size=32,
         num_hidden_layers=2,
         num_attention_heads=2,
         num_key_value_heads=2,
-        max_position_embeddings=16,
+        head_dim=8,
+        max_position_embeddings=32,
         bos_token_id=1,
         eos_token_id=2,
         pad_token_id=0,
         use_cache=False,
         attn_implementation="eager",
+        layer_types=["full_attention", "full_attention"],
     )
-    model = LlamaForCausalLM(config)
+    model = AutoModelForCausalLM.from_config(config)
     model.eval()
-    inputs = {
-        "input_ids": torch.tensor([[1, 2, 3, 4]], dtype=torch.long),
-        "attention_mask": torch.ones((1, 4), dtype=torch.long),
-    }
-    return model, inputs
+    return model, _tiny_inputs()
 
 
-@pytest.mark.parametrize("builder", [_build_gpt2, _build_llama])
+@pytest.mark.parametrize("builder", [_build_llama31, _build_gemma3, _build_qwen35])
 def test_transformers_passthrough_matches_wrapped_model(
     builder: Callable[[], tuple[torch.nn.Module, dict[str, Any]]],
 ) -> None:
@@ -89,8 +109,8 @@ def test_transformers_passthrough_matches_wrapped_model(
 
 def test_transformers_model_loads_from_local_path(tmp_path: Path) -> None:
     torch.manual_seed(0)
-    wrapped, inputs = _build_gpt2()
-    save_path = tmp_path / "gpt2"
+    wrapped, inputs = _build_llama31()
+    save_path = tmp_path / "llama31"
     cast(Any, wrapped).save_pretrained(save_path)
 
     model = ti.Model(str(save_path))
@@ -104,8 +124,9 @@ def test_transformers_model_loads_from_local_path(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("builder", "path", "layers_path"),
     [
-        (_build_gpt2, "transformer.h.1.attn", "transformer.h.1"),
-        (_build_llama, "model.layers.1.self_attn", "model.layers.1"),
+        (_build_llama31, "model.layers.1.self_attn", "model.layers.1"),
+        (_build_gemma3, "model.language_model.layers.1.self_attn", "model.language_model.layers.1"),
+        (_build_qwen35, "model.layers.1.self_attn", "model.layers.1"),
     ],
 )
 def test_transformers_navigation_and_get_match_manual_hook(
@@ -138,8 +159,9 @@ def test_transformers_navigation_and_get_match_manual_hook(
 @pytest.mark.parametrize(
     ("builder", "path"),
     [
-        (_build_gpt2, "transformer.h.1.attn"),
-        (_build_llama, "model.layers.1.self_attn"),
+        (_build_llama31, "model.layers.1.self_attn"),
+        (_build_gemma3, "model.language_model.layers.1.self_attn"),
+        (_build_qwen35, "model.layers.1.self_attn"),
     ],
 )
 def test_transformers_map_matches_manual_hook(
@@ -166,16 +188,30 @@ def test_transformers_map_matches_manual_hook(
     assert torch.allclose(actual, expected)
 
 
-def test_transformers_renames_enable_canonical_gpt2_access() -> None:
-    wrapped, _inputs = _build_gpt2()
+@pytest.mark.parametrize(
+    ("builder", "layers_path"),
+    [
+        (_build_llama31, "model.layers.0.self_attn"),
+        (_build_gemma3, "model.language_model.layers.0.self_attn"),
+        (_build_qwen35, "model.layers.0.self_attn"),
+    ],
+)
+def test_transformers_layers_shortcut_finds_requested_families(
+    builder: Callable[[], tuple[torch.nn.Module, dict[str, Any]]],
+    layers_path: str,
+) -> None:
+    wrapped, _inputs = builder()
     model = ti.Model(wrapped, rename=ti.renames.llm)
 
-    assert model.model.layers[0].self_attn == model.transformer.h[0].attn
+    assert model.layers[0].self_attn.path == layers_path
 
 
-def test_transformers_generate_matches_wrapped_model() -> None:
+@pytest.mark.parametrize("builder", [_build_llama31, _build_gemma3, _build_qwen35])
+def test_transformers_generate_matches_wrapped_model(
+    builder: Callable[[], tuple[torch.nn.Module, dict[str, Any]]],
+) -> None:
     torch.manual_seed(0)
-    wrapped, inputs = _build_gpt2()
+    wrapped, inputs = builder()
     model = ti.Model(wrapped)
 
     generate_kwargs = {
@@ -193,11 +229,37 @@ def test_transformers_generate_matches_wrapped_model() -> None:
     assert torch.equal(actual, expected)
 
 
-def test_transformers_generate_map_matches_manual_hook() -> None:
-    torch.manual_seed(0)
-    wrapped, inputs = _build_gpt2()
+def test_transformers_generate_rejects_stop_at_last_get() -> None:
+    wrapped, inputs = _build_llama31()
     model = ti.Model(wrapped)
-    path = "transformer.h.0.attn"
+
+    generate_kwargs = {
+        "input_ids": inputs["input_ids"],
+        "attention_mask": inputs["attention_mask"],
+        "max_new_tokens": 2,
+        "do_sample": False,
+        "use_cache": False,
+    }
+
+    with pytest.raises(ValueError, match="stop_at_last_get=True"):
+        _ = model.generate(**generate_kwargs, stop_at_last_get=True)
+
+
+@pytest.mark.parametrize(
+    ("builder", "path"),
+    [
+        (_build_llama31, "model.layers.0.self_attn"),
+        (_build_gemma3, "model.language_model.layers.0.self_attn"),
+        (_build_qwen35, "model.layers.0.self_attn"),
+    ],
+)
+def test_transformers_generate_map_matches_manual_hook(
+    builder: Callable[[], tuple[torch.nn.Module, dict[str, Any]]],
+    path: str,
+) -> None:
+    torch.manual_seed(0)
+    wrapped, inputs = builder()
+    model = ti.Model(wrapped)
 
     generate_kwargs = {
         "input_ids": inputs["input_ids"],
@@ -221,3 +283,62 @@ def test_transformers_generate_map_matches_manual_hook() -> None:
     actual = model.generate(**generate_kwargs, map={get_proxy(model, path): ti.zero()})
 
     assert torch.equal(actual._model_output, expected)
+
+
+@pytest.mark.parametrize(
+    ("builder", "path"),
+    [
+        (_build_llama31, "model.layers.0.self_attn"),
+        (_build_gemma3, "model.language_model.layers.0.self_attn"),
+        (_build_qwen35, "model.layers.0.self_attn"),
+    ],
+)
+def test_transformers_batch_fused_outputs_expose_logits(
+    builder: Callable[[], tuple[torch.nn.Module, dict[str, Any]]],
+    path: str,
+) -> None:
+    wrapped, inputs = builder()
+    model = ti.Model(wrapped)
+    proxy = get_proxy(model, path)
+
+    with torch.no_grad():
+        expected_zero = model(**inputs, map={proxy: ti.zero()}).logits
+        expected_shift = model(**inputs, map={proxy: ti.add(1.0)}).logits
+
+    with ti.batch():
+        out_zero = model(**inputs, map={proxy: ti.zero()})
+        out_shift = model(**inputs, map={proxy: ti.add(1.0)})
+
+    assert torch.allclose(out_zero.logits, expected_zero)
+    assert torch.allclose(out_shift.logits, expected_shift)
+
+
+def _configure_text_config(config: Any) -> None:
+    if hasattr(config, "vocab_size"):
+        config.vocab_size = 64
+    if hasattr(config, "hidden_size"):
+        config.hidden_size = 16
+    if hasattr(config, "intermediate_size"):
+        config.intermediate_size = 32
+    if hasattr(config, "num_hidden_layers"):
+        config.num_hidden_layers = 2
+    if hasattr(config, "num_attention_heads"):
+        config.num_attention_heads = 2
+    if hasattr(config, "num_key_value_heads"):
+        config.num_key_value_heads = 2
+    if hasattr(config, "head_dim"):
+        config.head_dim = 8
+    if hasattr(config, "max_position_embeddings"):
+        config.max_position_embeddings = 32
+    if hasattr(config, "bos_token_id"):
+        config.bos_token_id = 1
+    if hasattr(config, "eos_token_id"):
+        config.eos_token_id = 2
+    if hasattr(config, "pad_token_id"):
+        config.pad_token_id = 0
+    if hasattr(config, "use_cache"):
+        config.use_cache = False
+    if hasattr(config, "attn_implementation"):
+        config.attn_implementation = "eager"
+    if hasattr(config, "layer_types"):
+        config.layer_types = ["full_attention"] * int(config.num_hidden_layers)

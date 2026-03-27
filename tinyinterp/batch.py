@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+from collections import OrderedDict
 from contextlib import ContextDecorator
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
@@ -12,6 +13,7 @@ import torch
 
 from .context import get_debug
 from .counters import Counters
+from .debug import log_batch_plan
 from .hooks import MapFn
 from .output import Output
 
@@ -49,11 +51,12 @@ def maybe_enqueue_call(
     get_proxies: list[Any],
     map_proxies: dict[Any, MapFn],
     grad: bool,
+    stop_at_last_get: bool = False,
 ) -> _DeferredResult | None:
     """Queue a model call when a batch context is active."""
 
     planner = _ACTIVE_BATCH.get()
-    if planner is None or grad:
+    if planner is None or grad or stop_at_last_get:
         return None
     return planner.enqueue(
         _QueuedCall(
@@ -127,13 +130,10 @@ class _BatchPlanner:
         try:
             queue = self._queue
             self._queue = []
-            idx = 0
-            while idx < len(queue):
-                group = [queue[idx]]
-                idx += 1
-                while idx < len(queue) and _calls_are_compatible(group[0], queue[idx]):
-                    group.append(queue[idx])
-                    idx += 1
+            groups: OrderedDict[tuple[Any, ...], list[_QueuedCall]] = OrderedDict()
+            for call in queue:
+                groups.setdefault(_call_signature(call), []).append(call)
+            for group in groups.values():
                 self._execute_group(group)
         finally:
             self._flushing = False
@@ -142,11 +142,11 @@ class _BatchPlanner:
         Counters.batch_groups += 1
         Counters.batch_fusions += max(0, len(group) - 1)
         if get_debug() >= 3:
-            model_name = type(group[0].model.wrapped).__name__
-            paths = ", ".join(proxy.path for proxy in group[0].map_proxies)
-            print(
-                f"[ti] batch: size={len(group)} model={model_name} "
-                f"maps=[{paths}] get={len(group[0].get_proxies)}"
+            log_batch_plan(
+                size=len(group),
+                model_name=type(group[0].model.wrapped).__name__,
+                get_paths=[proxy.path for proxy in group[0].get_proxies],
+                map_paths=[proxy.path for proxy in group[0].map_proxies],
             )
 
         if len(group) == 1:
@@ -180,15 +180,37 @@ class _BatchPlanner:
 
 
 def _calls_are_compatible(left: _QueuedCall, right: _QueuedCall) -> bool:
-    if left.model is not right.model:
-        return False
-    if [proxy.path for proxy in left.get_proxies] != [proxy.path for proxy in right.get_proxies]:
-        return False
-    left_map_paths = sorted(proxy.path for proxy in left.map_proxies)
-    right_map_paths = sorted(proxy.path for proxy in right.map_proxies)
-    if left_map_paths != right_map_paths:
-        return False
-    return _can_stack_values(left.args, right.args) and _can_stack_values(left.kwargs, right.kwargs)
+    return _call_signature(left) == _call_signature(right)
+
+
+def _call_signature(call: _QueuedCall) -> tuple[Any, ...]:
+    return (
+        id(call.model),
+        tuple(proxy.path for proxy in call.get_proxies),
+        tuple(sorted(proxy.path for proxy in call.map_proxies)),
+        _value_signature(call.args),
+        _value_signature(call.kwargs),
+    )
+
+
+def _value_signature(value: Any) -> Any:
+    if isinstance(value, torch.Tensor):
+        return ("tensor", str(value.device), str(value.dtype), tuple(value.shape[1:]))
+    if isinstance(value, dict):
+        items = sorted(value.items(), key=lambda item: repr(item[0]))
+        return (
+            "dict",
+            tuple((repr(key), _value_signature(item_value)) for key, item_value in items),
+        )
+    if isinstance(value, tuple):
+        return ("tuple", tuple(_value_signature(item) for item in value))
+    if isinstance(value, list):
+        return ("list", tuple(_value_signature(item) for item in value))
+    if isinstance(value, slice):
+        return ("slice", value.start, value.stop, value.step)
+    if isinstance(value, (str, bytes, int, float, bool, type(None))):
+        return ("literal", value)
+    return ("object", type(value).__name__, repr(value))
 
 
 def _can_stack_values(left: Any, right: Any) -> bool:
@@ -285,9 +307,22 @@ def _split_result(result: Any, batch_sizes: list[int]) -> list[Any]:
         outputs: list[Output] = []
         for idx, model_output in enumerate(model_outputs):
             activations = {sid: chunks[idx] for sid, chunks in activation_slices.items()}
-            outputs.append(Output(model_output, activations, result._id_to_sid))
+            outputs.append(
+                Output(
+                    model_output,
+                    activations,
+                    result._id_to_sid,
+                    completed_forward=result.completed_forward,
+                )
+            )
         return outputs
     return _split_value(result, batch_sizes)
+
+
+def batch_active() -> bool:
+    """Return whether a ``ti.batch()`` context is currently active."""
+
+    return _ACTIVE_BATCH.get() is not None
 
 
 def _split_value(value: Any, batch_sizes: list[int]) -> list[Any]:

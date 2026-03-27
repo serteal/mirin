@@ -9,13 +9,12 @@ from typing import Any, cast
 import torch
 import torch.nn as nn
 
-from .batch import maybe_enqueue_call
+from .batch import batch_active, maybe_enqueue_call
 from .context import get_debug, get_graph_path
 from .counters import Counters
 from .debug import log_call_start, log_model_ready, log_timing, render_intervention_graph
-from .hooks import HookState, MapFn, install_hooks
+from .hooks import HookState, MapFn, _EarlyStop, install_hooks
 from .output import Output
-from .stream import stream_model
 
 
 class _ModuleProxy:
@@ -153,7 +152,7 @@ class Model:
             for path, module in self.wrapped.named_modules():
                 if not isinstance(module, nn.ModuleList):
                     continue
-                if best is None or len(module) > len(best[1]):
+                if best is None or _layers_sort_key(path, module) > _layers_sort_key(*best):
                     best = (path, module)
             if best is None:
                 raise AttributeError("No ModuleList found. Navigate directly.")
@@ -178,10 +177,20 @@ class Model:
         get: Sequence[_ModuleProxy] | _ModuleProxy | None = None,
         map: dict[_ModuleProxy, MapFn] | None = None,
         grad: bool = False,
+        stop_at_last_get: bool = False,
         **kwargs: Any,
     ) -> Any:
         get_proxies = self._normalize_get(get)
         map_proxies = self._normalize_map(map)
+        if stop_at_last_get:
+            if not get_proxies:
+                raise ValueError("stop_at_last_get=True requires at least one get= site.")
+            if map_proxies:
+                raise ValueError("stop_at_last_get=True does not support map=.")
+            if grad:
+                raise ValueError("stop_at_last_get=True does not support grad=True.")
+            if batch_active():
+                raise ValueError("stop_at_last_get=True is not supported inside ti.batch().")
         deferred = maybe_enqueue_call(
             self,
             args=tuple(args),
@@ -189,6 +198,7 @@ class Model:
             get_proxies=get_proxies,
             map_proxies=map_proxies,
             grad=grad,
+            stop_at_last_get=stop_at_last_get,
         )
         if deferred is not None:
             return deferred
@@ -198,6 +208,7 @@ class Model:
             get_proxies=get_proxies,
             map_proxies=map_proxies,
             grad=grad,
+            stop_at_last_get=stop_at_last_get,
         )
 
     def generate(
@@ -205,10 +216,13 @@ class Model:
         *args: Any,
         get: Sequence[_ModuleProxy] | _ModuleProxy | None = None,
         map: dict[_ModuleProxy, MapFn] | None = None,
+        stop_at_last_get: bool = False,
         **kwargs: Any,
     ) -> Any:
         """Run generation with hooks active across the whole call."""
 
+        if stop_at_last_get:
+            raise ValueError("stop_at_last_get=True is not supported for model.generate().")
         generate_fn = getattr(self.wrapped, "generate", None)
         if not callable(generate_fn):
             raise AttributeError(
@@ -221,30 +235,7 @@ class Model:
             get_proxies=self._normalize_get(get),
             map_proxies=self._normalize_map(map),
             grad=False,
-        )
-
-    def stream(
-        self,
-        dataloader: Any,
-        *,
-        get: Sequence[_ModuleProxy] | _ModuleProxy | None = None,
-        map: dict[_ModuleProxy, MapFn] | None = None,
-        grad: bool = False,
-        batch_size: int | None = None,
-        to_cpu: bool = True,
-        non_blocking: bool = True,
-    ) -> Any:
-        """Iterate over a dataset and yield tinyinterp outputs per batch."""
-
-        return stream_model(
-            self,
-            dataloader,
-            get=get,
-            map_dict=map,
-            grad=grad,
-            batch_size=batch_size,
-            to_cpu=to_cpu,
-            non_blocking=non_blocking,
+            stop_at_last_get=False,
         )
 
     def _normalize_get(
@@ -283,6 +274,7 @@ class Model:
         get_proxies: list[_ModuleProxy],
         map_proxies: dict[_ModuleProxy, MapFn],
         grad: bool,
+        stop_at_last_get: bool = False,
         requested_calls: int = 1,
         execute: Callable[[dict[str, Any]], Any] | None = None,
     ) -> Any:
@@ -293,17 +285,33 @@ class Model:
 
         debug = get_debug()
         if debug >= 1:
-            log_call_start(get_proxies, map_proxies, grad=grad, args=args, kwargs=kwargs)
+            log_call_start(
+                get_proxies,
+                map_proxies,
+                grad=grad,
+                stop_at_last_get=stop_at_last_get,
+                args=args,
+                kwargs=kwargs,
+            )
 
         t0 = time.perf_counter_ns()
-        self._hooks.activate(get_proxies, map_proxies, grad=grad)
+        self._hooks.activate(
+            get_proxies,
+            map_proxies,
+            grad=grad,
+            stop_at_last_get=stop_at_last_get,
+        )
         t1 = time.perf_counter_ns()
 
         activations: dict[int, torch.Tensor] = {}
         failed = False
+        stopped_early = False
+        model_output: Any = None
         try:
             with torch.enable_grad() if grad else torch.no_grad():
                 model_output = execute(dict(kwargs))
+        except _EarlyStop:
+            stopped_early = True
         except Exception:
             failed = True
             raise
@@ -314,15 +322,19 @@ class Model:
 
         forward_ns = t2 - t1
         hook_overhead_ns = (t1 - t0) + (t3 - t2)
+        total_time_ns = t3 - t0
         activation_bytes = sum(
             tensor.element_size() * tensor.numel() for tensor in activations.values()
         )
         Counters.calls += requested_calls
         Counters.forward_passes += 1
+        Counters.total_time_ns += total_time_ns
         Counters.forward_time_ns += forward_ns
         Counters.hook_overhead_ns += hook_overhead_ns
         Counters.activations_captured += len(activations)
         Counters.activations_bytes += activation_bytes
+        if stopped_early:
+            Counters.early_stops += requested_calls
 
         if debug >= 2:
             log_timing(
@@ -331,6 +343,7 @@ class Model:
                 collect_ns=t3 - t2,
                 n_activations=len(activations),
                 activation_bytes=activation_bytes,
+                stopped_early=stopped_early,
             )
         graph_path = get_graph_path()
         if not failed and graph_path is not None and (get_proxies or map_proxies):
@@ -338,7 +351,12 @@ class Model:
 
         if not get_proxies and not map_proxies:
             return model_output
-        return Output(model_output, activations, self._hooks.id_map)
+        return Output(
+            model_output,
+            activations,
+            self._hooks.id_map,
+            completed_forward=not stopped_early,
+        )
 
 
 def _wrap_proxy(
@@ -356,6 +374,22 @@ def _join_path(parent: str, child: str) -> str:
     if not parent:
         return child
     return f"{parent}.{child}"
+
+
+def _layers_sort_key(path: str, module: nn.ModuleList) -> tuple[int, int, int]:
+    lowered = path.lower()
+    score = 0
+    if "language_model.layers" in lowered:
+        score += 400
+    elif lowered.endswith("model.layers"):
+        score += 300
+    elif lowered.endswith("layers"):
+        score += 200
+    elif lowered.endswith(".h"):
+        score += 150
+    if "vision" in lowered:
+        score -= 500
+    return (score, len(module), -lowered.count("."))
 
 
 def _load_model(name_or_path: str, **load_kwargs: Any) -> nn.Module:

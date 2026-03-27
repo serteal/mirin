@@ -49,7 +49,6 @@ Layer 1: Core (~800 lines)
          model.generate() — generation with interventions
          ti.replace/add/zero/scale/noise — named maps
          ti.batch() — batching hint
-         model.stream() — dataset-scale collection
 ```
 
 Each layer adds a little architecture knowledge. Layer 1 adds none. Layer 2 adds "there's a repeated block stack." Layer 3 adds "GPT-2 calls it `h`, LLaMA calls it `layers`."
@@ -94,6 +93,10 @@ logits = model(input_ids=ids, attention_mask=mask)
 output = model(input, get=[model.model.layers[5]])
 resid = output[model.model.layers[5]]        # the layer's output tensor
 
+# Capture only and stop after the last requested site.
+capture = model(input, get=[model.model.layers[5]], stop_at_last_get=True)
+resid = capture[model.model.layers[5]]
+
 # Modify activations
 output = model(input, map={model.model.layers[5]: ti.zero()})
 
@@ -107,6 +110,11 @@ output = model(input,
 output = model(input, get=[model.model.layers[5]], grad=True)
 output[model.model.layers[5]].backward(...)
 ```
+
+`stop_at_last_get=True` is an explicit capture-only optimization for normal `model(...)` calls. It
+does not apply to `model.generate()`, it currently does not combine with `map=`, `grad=True`, or
+`ti.batch()`, and the returned `Output` is partial: activation lookup works, but there is no final
+`output.logits` because the forward did not finish.
 
 **Input forwarding is total.** `*args` and `**kwargs` pass untouched to the real model. Any input format the model accepts works: strings (if the model handles them), token dicts, images, audio, `past_key_values`, labels. We intercept only `get=`, `map=`, and `grad=`.
 
@@ -498,25 +506,35 @@ with ti.batch():
 
 Inside `ti.batch()`, calls are accumulated and batched into minimal forward passes. Without it, the loop runs eagerly. This is tinygrad's `TinyJit` pattern: laziness is opt-in.
 
-### 8.3 model.stream() for datasets
+### 8.3 Dataset collection stays a normal loop
 
 ```python
-for batch_output in model.stream(dataloader, get=[model.layers[8]], batch_size=32):
-    acts = batch_output[model.layers[8]]  # on CPU, async-transferred
+for batch, idx in _iter_batches(tokens, batch_size):
+    output = model(**batch, use_cache=False, get=[model.layers[8]])
+    acts = output[model.layers[8]]
 ```
 
-Triple-buffered pipeline: GPU forward on batch N, async DMA transfer of batch N-1, CPU processing of batch N-2.
+`model.stream()` was prototyped and benchmarked, but it did not show a consistent improvement
+over the plain Python loop on real workloads. Following the tinygrad philosophy, the simpler
+version stays and the helper is removed.
 
 ### 8.4 Server mode
 
 ```python
-# Server: model persists on GPU
 server = ti.Server("meta-llama/Llama-3.2-1B", device="cuda")
-server.serve(port=8420)
+plan = server.compile(
+    get=["model.layers.8"],
+    output={"logits": False, "activations": True},
+)
 
-# Client: identical API
-model = ti.connect("localhost:8420")
-output = model("Hello", get=[model.layers[5]])
+collector = server.open_collector(plan=plan, stop_at_last_get=True)
+for batch_out in collector.run(dataset):
+    acts = batch_out.activations["model.layers.8"]
+
+session = server.open_session(plan=plan, cache="dynamic")
+server.prefill(session, input_ids=prompt_ids, attention_mask=prompt_mask)
+step = server.decode([session], max_new_tokens=1)[0]
+token = step.token_ids
 ```
 
 ---
@@ -568,21 +586,22 @@ probelab's datasets, tokenization, masks, probes, metrics, and pooling are compl
 
 ```
 tinyinterp/
-├── __init__.py      [  20 lines]  Exports: Model, connect, find, replace/add/zero/...
+├── __init__.py      [  20 lines]  Exports: Model, Server, find, replace/add/zero/...
 ├── model.py         [ 180 lines]  Model + _ModuleProxy + _ModuleListProxy + Output
 ├── hooks.py         [  80 lines]  HookState + _extract + _replace
 ├── maps.py          [  40 lines]  Named maps + head utilities
 ├── renames.py       [  40 lines]  Pre-built rename packs (llm, vision)
 ├── utils.py         [  20 lines]  find, find_all, children
 ├── batch.py         [ 120 lines]  ti.batch() context + planning
-├── stream.py        [  80 lines]  model.stream() triple-buffered
 ├── debug.py         [  80 lines]  DEBUG output + GRAPH rendering
 ├── counters.py      [  40 lines]  ti.Counters
 ├── context.py       [  25 lines]  ti.context()
 ├── server/
-│   ├── engine.py    [ 180 lines]
-│   ├── protocol.py  [ 120 lines]
-│   └── client.py    [ 100 lines]
+│   ├── inference.py [ 350 lines]
+│   ├── plans.py     [ 180 lines]
+│   ├── sessions.py  [ 140 lines]
+│   ├── collector.py [  60 lines]
+│   └── results.py   [  20 lines]
 └── sz.py            [  10 lines]  CI line count enforcer
                           CORE: ~725 lines
                         SERVER: ~400 lines
@@ -612,7 +631,7 @@ extract = lambda o: o if isinstance(o, torch.Tensor) else o[0] if isinstance(o, 
 - Type hints on all public functions
 - Errors name what's wrong, what's expected, and what to do
 - No global mutable state (hook state lives on the Model object)
-- Dependencies: `torch` only for core, `transformers` optional for `ti.Model(string)`, `pyzmq` optional for server
+- Dependencies: `torch` only for core, `transformers` optional for `ti.Model(string)` and the HuggingFace server path
 
 ---
 
@@ -623,8 +642,8 @@ extract = lambda o: o if isinstance(o, torch.Tensor) else o[0] if isinstance(o, 
 | 0     | `model.py` + `hooks.py` + `maps.py`. `model(input, get=[module])` works on GPT-2. | ~300  | 2 weeks  |
 | 1     | `map=` support. `renames.py` with LLM pack. Replicate IOI patching.               | +160  | 2 weeks  |
 | 2     | `model.layers`. `ti.find`. `model.generate(map=)`. Test on 10+ architectures.     | +100  | 2 weeks  |
-| 3     | `ti.batch()`. `model.stream()`. Benchmark vs TransformerLens/NNsight.             | +200  | 3 weeks  |
-| 4     | Server mode. Protocol + engine + client.                                          | +400  | 3 weeks  |
+| 3     | `ti.batch()`. Benchmark vs TransformerLens/nnterp (built on NNsight). `model.stream()` removed after benchmarks showed no consistent win vs a normal loop. | +200  | 3 weeks  |
+| 4     | Inference server. Compiled plans, collector mode, explicit prefill/decode.        | +400  | 3 weeks  |
 | 5     | Debug tools. probelab integration. Migration guide. Release.                      | +155  | 2 weeks  |
 
 **14 weeks to v1.0.**

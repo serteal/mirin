@@ -21,6 +21,7 @@ def log_call_start(
     map_proxies: Mapping[Any, Callable[[torch.Tensor], torch.Tensor]],
     *,
     grad: bool,
+    stop_at_last_get: bool,
     args: Sequence[Any],
     kwargs: Mapping[str, Any],
 ) -> None:
@@ -29,7 +30,11 @@ def log_call_start(
     get_names = ", ".join(proxy.path for proxy in get_proxies)
     map_names = ", ".join(f"{proxy.path}:{_callable_name(fn)}" for proxy, fn in map_proxies.items())
     input_shape = _input_shape(args, kwargs)
-    print(f"[ti] call: get=[{get_names}] map=[{map_names}] grad={grad} input_shape={input_shape}")
+    print(
+        "[ti] call: "
+        f"get=[{get_names}] map=[{map_names}] grad={grad} "
+        f"stop_at_last_get={stop_at_last_get} input_shape={input_shape}"
+    )
 
 
 def log_timing(
@@ -39,6 +44,7 @@ def log_timing(
     collect_ns: int,
     n_activations: int,
     activation_bytes: int,
+    stopped_early: bool,
 ) -> None:
     """Print a per-call timing breakdown."""
 
@@ -49,7 +55,12 @@ def log_timing(
         f"[ti]   collect:        {collect_ns / 1e6:.3f}ms "
         f"({n_activations} activations, {activation_bytes} bytes)"
     )
-    print(f"[ti]   TOTAL:          {total_ns / 1e6:.3f}ms")
+    overhead_ns = activate_ns + collect_ns
+    overhead_pct = 0.0 if total_ns == 0 else (overhead_ns / total_ns) * 100.0
+    print(
+        f"[ti]   TOTAL:          {total_ns / 1e6:.3f}ms "
+        f"(overhead: {overhead_pct:.2f}%, stopped_early={stopped_early})"
+    )
 
 
 def log_hook_event(
@@ -136,6 +147,23 @@ def render_intervention_graph(
     svg_lines.append("</svg>")
     path.write_text("\n".join(svg_lines), encoding="ascii")
     print(f"[ti] graph: {path}")
+
+
+def log_batch_plan(
+    *,
+    size: int,
+    model_name: str,
+    get_paths: Sequence[str],
+    map_paths: Sequence[str],
+) -> None:
+    """Print a compact batch planner decision at debug level 3."""
+
+    joined_get = ", ".join(get_paths)
+    joined_map = ", ".join(map_paths)
+    print(
+        f"[ti] batch: size={size} model={model_name} "
+        f"get=[{joined_get}] map=[{joined_map}]"
+    )
 
 
 def _input_shape(args: Sequence[Any], kwargs: Mapping[str, Any]) -> str:

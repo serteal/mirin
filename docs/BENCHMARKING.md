@@ -8,7 +8,7 @@
    Every benchmarked path must first have a correctness check against the unfused eager path or the raw wrapped model.
 
 2. Measure user-visible work.
-   We care about whole forward passes, intervention sweeps, and dataset streaming throughput. Microbenchmarks are useful only when they explain a user-visible result.
+   We care about whole forward passes, intervention sweeps, and dataset-scale activation collection throughput. Microbenchmarks are useful only when they explain a user-visible result.
 
 3. Compare against the right baseline.
    The main baselines are:
@@ -16,7 +16,6 @@
    - `tinyinterp` with no `get=` / `map=`
    - `tinyinterp` eager `get=` / `map=`
    - `tinyinterp` inside `ti.batch()`
-   - `tinyinterp` `model.stream(...)`
 
 4. Report environment exactly.
    Every result should include:
@@ -38,7 +37,7 @@ When we move to a GPU machine, Phase 3 should benchmark these cases:
    Compare raw model vs `ti.Model(model)` with no `get=` / `map=`.
 
 2. Activation capture overhead.
-   Compare no hooks vs one `get=` vs several `get=` sites.
+   Compare no hooks vs one `get=` vs one `get=` with `stop_at_last_get=True` vs several `get=` sites.
 
 3. Activation patching overhead.
    Compare no hooks vs one `map=` vs several `map=` sites.
@@ -51,13 +50,17 @@ When we move to a GPU machine, Phase 3 should benchmark these cases:
    - total wall time
    - speedup factor
 
-5. Streaming throughput.
-   Compare a manual Python loop over dataset batches vs `model.stream(...)`.
+5. Dataset capture throughput.
+   Compare a manual Python loop over dataset batches across libraries, and compare the normal
+   full-forward `get=` path against capture-only `get=` with `stop_at_last_get=True`.
    Report:
    - examples / second
    - tokens / second when relevant
    - host memory usage
    - GPU memory usage if available
+
+The dedicated `model.stream(...)` helper was benchmarked and removed because it did not show a
+consistent improvement over the normal loop.
 
 ## Method
 

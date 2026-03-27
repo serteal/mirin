@@ -13,14 +13,14 @@ import torch.nn as nn
 import tinyinterp as ti
 from tinyinterp.hooks import _extract, _replace
 
-from .helpers import FakeGpt2Model, FakeLlamaModel, get_module, get_proxy
+from .helpers import FakeDecoderModel, FakeLlamaModel, get_module, get_proxy
 
 
 def _input_ids() -> torch.Tensor:
     return torch.tensor([[1, 2, 3, 4]], dtype=torch.long)
 
 
-@pytest.mark.parametrize("factory", [FakeGpt2Model, FakeLlamaModel])
+@pytest.mark.parametrize("factory", [FakeDecoderModel, FakeLlamaModel])
 def test_passthrough_matches_wrapped_model(factory: Callable[[], nn.Module]) -> None:
     torch.manual_seed(0)
     wrapped = factory()
@@ -37,7 +37,7 @@ def test_passthrough_matches_wrapped_model(factory: Callable[[], nn.Module]) -> 
 @pytest.mark.parametrize(
     ("factory", "path"),
     [
-        (FakeGpt2Model, "transformer.h.1.attn"),
+        (FakeDecoderModel, "transformer.h.1.attn"),
         (FakeLlamaModel, "model.layers.1.self_attn"),
     ],
 )
@@ -68,7 +68,42 @@ def test_get_matches_manual_hook(
 @pytest.mark.parametrize(
     ("factory", "path"),
     [
-        (FakeGpt2Model, "transformer.h.1.attn"),
+        (FakeDecoderModel, "transformer.h.1.attn"),
+        (FakeLlamaModel, "model.layers.1.self_attn"),
+    ],
+)
+def test_stop_at_last_get_returns_partial_output_and_matches_manual_hook(
+    factory: Callable[[], nn.Module],
+    path: str,
+) -> None:
+    torch.manual_seed(0)
+    wrapped = factory()
+    captured: dict[str, torch.Tensor] = {}
+
+    def capture(_module: nn.Module, _inputs: tuple[object, ...], output: object) -> None:
+        captured["act"] = _extract(output).detach()
+
+    handle = get_module(wrapped, path).register_forward_hook(capture)
+    try:
+        wrapped(_input_ids())
+    finally:
+        handle.remove()
+
+    model = ti.Model(wrapped)
+    proxy = get_proxy(model, path)
+    output = model(_input_ids(), get=[proxy], stop_at_last_get=True)
+
+    assert output.partial
+    assert not output.completed_forward
+    assert torch.allclose(output[proxy], captured["act"])
+    with pytest.raises(RuntimeError, match="stop_at_last_get=True"):
+        _ = output.logits
+
+
+@pytest.mark.parametrize(
+    ("factory", "path"),
+    [
+        (FakeDecoderModel, "transformer.h.1.attn"),
         (FakeLlamaModel, "model.layers.1.self_attn"),
     ],
 )
@@ -98,7 +133,7 @@ def test_map_matches_manual_hook(
 
 
 def test_call_cleans_up_after_exception() -> None:
-    wrapped = FakeGpt2Model()
+    wrapped = FakeDecoderModel()
     block0 = cast(Any, wrapped.transformer.h[0])
     block0.fail = True
     model = ti.Model(wrapped)
@@ -112,10 +147,54 @@ def test_call_cleans_up_after_exception() -> None:
     assert output[model.transformer.h[0]].shape[1] == _input_ids().shape[1]
 
 
+def test_stop_at_last_get_skips_later_blocks() -> None:
+    wrapped = FakeDecoderModel()
+    block1 = cast(Any, wrapped.transformer.h[1])
+    block1.fail = True
+    model = ti.Model(wrapped)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        _ = model(_input_ids(), get=[model.transformer.h[0]])
+
+    output = model(_input_ids(), get=[model.transformer.h[0]], stop_at_last_get=True)
+
+    assert output.partial
+    assert output[model.transformer.h[0]].shape[1] == _input_ids().shape[1]
+
+
+def test_stop_at_last_get_captures_multiple_sites_before_stopping() -> None:
+    wrapped = FakeDecoderModel()
+    block1 = cast(Any, wrapped.transformer.h[1])
+    block1.fail = True
+    model = ti.Model(wrapped)
+    attn = model.transformer.h[0].attn
+    block = model.transformer.h[0]
+
+    output = model(_input_ids(), get=[attn, block], stop_at_last_get=True)
+
+    assert output.partial
+    assert output[attn].shape[1] == _input_ids().shape[1]
+    assert output[block].shape[1] == _input_ids().shape[1]
+
+
+def test_stop_at_last_get_rejects_invalid_combinations() -> None:
+    model = ti.Model(FakeDecoderModel())
+    proxy = model.transformer.h[0]
+
+    with pytest.raises(ValueError, match="requires at least one get="):
+        _ = model(_input_ids(), stop_at_last_get=True)
+
+    with pytest.raises(ValueError, match="does not support map="):
+        _ = model(_input_ids(), get=[proxy], map={proxy: ti.zero()}, stop_at_last_get=True)
+
+    with pytest.raises(ValueError, match="does not support grad=True"):
+        _ = model(_input_ids(), get=[proxy], grad=True, stop_at_last_get=True)
+
+
 @pytest.mark.parametrize(
     ("factory", "expected_prefix"),
     [
-        (FakeGpt2Model, "transformer.h"),
+        (FakeDecoderModel, "transformer.h"),
         (FakeLlamaModel, "model.layers"),
     ],
 )
@@ -130,18 +209,18 @@ def test_layers_finds_biggest_modulelist(
 
 
 def test_find_and_children_explore_real_tree() -> None:
-    model = ti.Model(FakeGpt2Model())
+    model = ti.Model(FakeDecoderModel())
 
     found = ti.find(model.layers[0], "attn")
     assert found == model.transformer.h[0].attn
 
     listed = dict(ti.children(model.layers[0]))
-    assert listed["attn"] == "FakeGpt2Attention"
-    assert listed["mlp"] == "FakeGpt2Mlp"
+    assert listed["attn"] == "FakeDecoderAttention"
+    assert listed["mlp"] == "FakeDecoderMlp"
 
 
 def test_rename_pack_exposes_canonical_aliases() -> None:
-    model = ti.Model(FakeGpt2Model(), rename=ti.renames.llm)
+    model = ti.Model(FakeDecoderModel(), rename=ti.renames.llm)
 
     canonical = model.model.layers[0].self_attn
     real = model.transformer.h[0].attn
@@ -152,7 +231,7 @@ def test_rename_pack_exposes_canonical_aliases() -> None:
 
 def test_counters_debug_and_graph(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     ti.Counters.reset()
-    model = ti.Model(FakeGpt2Model())
+    model = ti.Model(FakeDecoderModel())
     graph_path = tmp_path / "graph.svg"
 
     with ti.context(debug=2, graph=graph_path):
@@ -171,6 +250,7 @@ def test_counters_debug_and_graph(tmp_path: Path, capsys: pytest.CaptureFixture[
     stdout = capsys.readouterr().out
     assert "[ti] call:" in stdout
     assert "transformer.h.0.attn" in stdout
+    assert "TOTAL:" in stdout
 
 
 def test_map_head_targets_only_one_slice() -> None:
