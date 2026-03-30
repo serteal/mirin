@@ -142,6 +142,7 @@ class DynamicBatchAdapter:
         if not keep_indices:
             return None
         first_keys = cast(torch.Tensor, cache.layers[0].keys)
+        _validate_keep_indices(keep_indices, size=int(first_keys.shape[0]))
         index = torch.tensor(
             list(keep_indices),
             device=first_keys.device,
@@ -238,15 +239,14 @@ class QwenHybridAdapter:
         first_tensor = _first_hybrid_state(cache)
         if first_tensor is None:
             return cache
+        _validate_keep_indices(keep_indices, size=int(first_tensor.shape[0]))
         index = torch.tensor(list(keep_indices), device=first_tensor.device, dtype=torch.long)
         compacted = _new_hybrid_cache_like(cache, wrapped)
         for attr in ("key_cache", "value_cache", "conv_states", "recurrent_states"):
             compacted_values: list[torch.Tensor | None] = []
             values = cast(list[torch.Tensor | None], getattr(cache, attr))
             for value in values:
-                compacted_values.append(
-                    None if value is None else value.index_select(0, index)
-                )
+                compacted_values.append(None if value is None else value.index_select(0, index))
             setattr(compacted, attr, compacted_values)
         return compacted
 
@@ -260,6 +260,16 @@ def _concat_optional_batch(
     if new_value is None:
         return existing
     return torch.cat([existing, new_value], dim=0)
+
+
+def _validate_keep_indices(keep_indices: Sequence[int], *, size: int) -> None:
+    values = [int(index) for index in keep_indices]
+    if values != sorted(values):
+        raise ValueError("keep_indices must be sorted in ascending order.")
+    if len(set(values)) != len(values):
+        raise ValueError("keep_indices must be unique.")
+    if values and (values[0] < 0 or values[-1] >= size):
+        raise ValueError(f"keep_indices must stay within [0, {size}).")
 
 
 def _first_hybrid_state(cache: Any) -> torch.Tensor | None:

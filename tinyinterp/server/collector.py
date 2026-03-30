@@ -17,7 +17,12 @@ if TYPE_CHECKING:
 
 @dataclass(slots=True)
 class Collector:
-    """Server-owned collector configuration."""
+    """Server-owned collector configuration.
+
+    ``token_budget`` applies to collector-side request splitting for dataset-like
+    iteration. This is separate from the scheduler's prefill/decode admission
+    budgets.
+    """
 
     id: str
     plan: CompiledPlan
@@ -36,8 +41,8 @@ class Collector:
     def collect_batch(self, batch: Mapping[str, Any]) -> PlanResult:
         return self.server.collect_batch(self, batch)
 
-    def collect_many(self, requests: Iterable[Any]) -> list[PlanResult]:
-        return self.server.collect_many(self, list(requests))
+    def collect_many(self, requests: Iterable[Any], **kwargs: Any) -> list[PlanResult]:
+        return self.server.collect_many(self, list(requests), **kwargs)
 
     def run(self, dataset: Iterable[Mapping[str, Any]]) -> Iterator[PlanResult]:
         for batch in dataset:
@@ -52,6 +57,8 @@ def _split_batch(
     batch: Mapping[str, Any],
     token_budget: int | None,
 ) -> list[dict[str, Any]]:
+    """Split one collector batch by a per-chunk token budget."""
+
     if token_budget is None:
         return [dict(batch)]
     input_ids = batch.get("input_ids")

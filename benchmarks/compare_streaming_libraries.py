@@ -13,13 +13,17 @@ import tinyinterp as ti
 
 from .compare_libraries import (
     _compare_tensors,
+    _import_transformers,
     _library_versions,
-    _load_workload,
+    _load_hf_model,
+    _load_nnterp_model,
+    _load_transformerlens_model,
     _manual_capture,
+    _release_models,
     _run_lens_capture,
     _run_nnterp_capture,
 )
-from .phase3 import (
+from .model_api import (
     _environment_report,
     _measure_case,
     _resolve_device,
@@ -59,17 +63,10 @@ def run_streaming_compare_benchmarks(config: StreamingCompareConfig) -> dict[str
     torch.manual_seed(config.seed)
     device = _resolve_device(config.device)
     dtype = _resolve_dtype(config.dtype)
-    workload = _load_workload(
-        _compare_config_from_streaming(config),
-        device=device,
-        dtype=dtype,
-    )
+    transformers = _import_transformers()
+    tokenizer = transformers.AutoTokenizer.from_pretrained(config.model_name)
 
-    raw_model = workload["raw_model"]
-    tiny_model = workload["tiny_model"]
-    lens_model = workload["lens_model"]
-    nn_model = workload["nn_model"]
-    tiny_site = tiny_model.layers[0]
+    raw_model = _load_hf_model(config.model_name, device=device, dtype=dtype)
 
     dataset = _make_dataset(
         vocab_size=int(raw_model.config.vocab_size),
@@ -82,9 +79,103 @@ def run_streaming_compare_benchmarks(config: StreamingCompareConfig) -> dict[str
     first_chunk = _iter_chunks(dataset[0], config.chunk_batch_size)[0]
 
     reference_activation = _manual_capture(raw_model, first_chunk, path=config.hf_block_path)
+    env = _environment_report(
+        raw_model,
+        model_name=config.model_name,
+        device=device,
+        dtype=dtype,
+        batch_size=config.chunk_batch_size,
+        seq_len=config.seq_len,
+    )
+    raw_case = _tag_stream_case(
+        _measure_case(
+            "raw_hf_hook_loop",
+            lambda model=raw_model: _run_raw_stream_loop(
+                model,
+                dataset,
+                path=config.hf_block_path,
+                chunk_batch_size=config.chunk_batch_size,
+            ),
+            warmup=config.warmup,
+            trials=config.trials,
+            device=device,
+        ),
+        library="raw_hf",
+    )
+    del raw_model
+    _release_models(device)
+
+    tiny_wrapped = _load_hf_model(config.model_name, device=device, dtype=dtype)
+    tiny_model = ti.Model(tiny_wrapped)
+    tiny_site = tiny_model.layers[0]
     tiny_manual_first = tiny_model(**first_chunk, get=[tiny_site])[tiny_site]
+    tiny_case = _tag_stream_case(
+        _measure_case(
+            "tinyinterp_manual_loop",
+            lambda model=tiny_model, site=tiny_site: _run_tinyinterp_manual_loop(
+                model,
+                dataset,
+                site,
+                chunk_batch_size=config.chunk_batch_size,
+            ),
+            warmup=config.warmup,
+            trials=config.trials,
+            device=device,
+            use_counters=True,
+        ),
+        library="tinyinterp_manual",
+    )
+    tiny_site_path = tiny_site.path
+    del tiny_model
+    del tiny_wrapped
+    _release_models(device)
+
+    tl_source = _load_hf_model(config.model_name, device=device, dtype=dtype)
+    lens_model = _load_transformerlens_model(
+        config.model_name,
+        hf_model=tl_source,
+        tokenizer=tokenizer,
+        device=device,
+        dtype=dtype,
+    )
+    del tl_source
     lens_first = _run_lens_activation(lens_model, first_chunk["input_ids"], config.lens_hook_name)
+    lens_case = _tag_stream_case(
+        _measure_case(
+            "transformerlens_loop",
+            lambda model=lens_model: _run_transformerlens_loop(
+                model,
+                dataset,
+                hook_name=config.lens_hook_name,
+                chunk_batch_size=config.chunk_batch_size,
+            ),
+            warmup=config.warmup,
+            trials=config.trials,
+            device=device,
+        ),
+        library="transformerlens",
+    )
+    del lens_model
+    _release_models(device)
+
+    nn_model = _load_nnterp_model(config.model_name, device=device, dtype=dtype)
     nn_first = _run_nnterp_capture(nn_model, first_chunk)["activation"]
+    nn_case = _tag_stream_case(
+        _measure_case(
+            "nnterp_loop",
+            lambda model=nn_model: _run_nnterp_loop(
+                model,
+                dataset,
+                chunk_batch_size=config.chunk_batch_size,
+            ),
+            warmup=config.warmup,
+            trials=config.trials,
+            device=device,
+        ),
+        library="nnterp",
+    )
+    del nn_model
+    _release_models(device)
 
     correctness = {
         "tinyinterp_manual": _compare_tensors(
@@ -102,68 +193,7 @@ def run_streaming_compare_benchmarks(config: StreamingCompareConfig) -> dict[str
     }
 
     total_examples = config.dataset_batches * config.source_batch_size
-    cases = [
-        _tag_stream_case(
-            _measure_case(
-                "raw_hf_hook_loop",
-                lambda: _run_raw_stream_loop(
-                    raw_model,
-                    dataset,
-                    path=config.hf_block_path,
-                    chunk_batch_size=config.chunk_batch_size,
-                ),
-                warmup=config.warmup,
-                trials=config.trials,
-                device=device,
-            ),
-            library="raw_hf",
-        ),
-        _tag_stream_case(
-            _measure_case(
-                "tinyinterp_manual_loop",
-                lambda: _run_tinyinterp_manual_loop(
-                    tiny_model,
-                    dataset,
-                    tiny_site,
-                    chunk_batch_size=config.chunk_batch_size,
-                ),
-                warmup=config.warmup,
-                trials=config.trials,
-                device=device,
-                use_counters=True,
-            ),
-            library="tinyinterp_manual",
-        ),
-        _tag_stream_case(
-            _measure_case(
-                "transformerlens_loop",
-                lambda: _run_transformerlens_loop(
-                    lens_model,
-                    dataset,
-                    hook_name=config.lens_hook_name,
-                    chunk_batch_size=config.chunk_batch_size,
-                ),
-                warmup=config.warmup,
-                trials=config.trials,
-                device=device,
-            ),
-            library="transformerlens",
-        ),
-        _tag_stream_case(
-            _measure_case(
-                "nnterp_loop",
-                lambda: _run_nnterp_loop(
-                    nn_model,
-                    dataset,
-                    chunk_batch_size=config.chunk_batch_size,
-                ),
-                warmup=config.warmup,
-                trials=config.trials,
-                device=device,
-            ),
-            library="nnterp",
-        ),
-    ]
+    cases = [raw_case, tiny_case, lens_case, nn_case]
     _annotate_stream_metrics(
         cases,
         raw_name="raw_hf_hook_loop",
@@ -174,20 +204,13 @@ def run_streaming_compare_benchmarks(config: StreamingCompareConfig) -> dict[str
     report = {
         "config": asdict(config),
         "environment": {
-            **_environment_report(
-                raw_model,
-                model_name=config.model_name,
-                device=device,
-                dtype=dtype,
-                batch_size=config.chunk_batch_size,
-                seq_len=config.seq_len,
-            ),
+            **env,
             "source_batch_size": config.source_batch_size,
             "dataset_batches": config.dataset_batches,
             "total_examples": total_examples,
             "site_mapping": {
                 "hf_block_path": config.hf_block_path,
-                "tinyinterp_site": tiny_site.path,
+                "tinyinterp_site": tiny_site_path,
                 "transformerlens_hook": config.lens_hook_name,
                 "nnterp_site": "layers_output[0]",
             },
@@ -226,6 +249,9 @@ def format_streaming_compare_report(report: dict[str, Any]) -> str:
     lines.append("")
     lines.append("Timing:")
     for case in report["cases"]:
+        if case.get("skipped"):
+            lines.append(f"- {case['library']}: skipped ({case['skipped']})")
+            continue
         lines.append(
             f"- {case['library']}: {case['median_ms']:.3f}ms "
             f"ex/s={case['examples_per_second']:.1f} "
@@ -261,7 +287,7 @@ def _make_dataset(
     seed: int,
     device: torch.device,
 ) -> list[dict[str, torch.Tensor]]:
-    generator = torch.Generator(device=device.type if device.type == "cuda" else "cpu")
+    generator = torch.Generator(device=device)
     generator.manual_seed(seed)
     return [
         {
@@ -384,10 +410,16 @@ def _annotate_stream_metrics(
     by_name = {case["name"]: case for case in cases}
     raw_case = by_name[raw_name]
     for case in cases:
+        if case.get("skipped"):
+            continue
+        median_ms = case.get("median_ms")
+        raw_median_ms = raw_case.get("median_ms")
+        if not isinstance(median_ms, (int, float)) or median_ms <= 0:
+            continue
         if case["name"] != raw_name:
-            case["overhead_vs_raw_pct"] = (
-                (case["median_ms"] / raw_case["median_ms"]) - 1.0
-            ) * 100.0
-        total_seconds = case["median_ms"] / 1000.0
+            if not isinstance(raw_median_ms, (int, float)) or raw_median_ms <= 0:
+                continue
+            case["overhead_vs_raw_pct"] = ((median_ms / raw_median_ms) - 1.0) * 100.0
+        total_seconds = median_ms / 1000.0
         case["examples_per_second"] = total_examples / total_seconds
         case["tokens_per_second"] = (total_examples * seq_len) / total_seconds

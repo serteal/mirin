@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import math
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -61,14 +62,101 @@ class FakeTokenizer:
         add_generation_prompt: bool = False,
     ) -> str | torch.Tensor:
         rendered = "\n".join(
-            f"{message.get('role', 'user')}: {message.get('content', '')}"
-            for message in messages
+            f"{message.get('role', 'user')}: {message.get('content', '')}" for message in messages
         )
         if add_generation_prompt:
             rendered = f"{rendered}\nassistant:"
         if tokenize:
             return self(rendered)["input_ids"][0]
         return rendered
+
+
+def request_contract_cases(
+    *,
+    add_generation_prompt: bool,
+) -> list[tuple[str, Any, dict[str, torch.Tensor]]]:
+    """Canonical request-form cases plus their expected tokenized inputs."""
+
+    tokenizer = FakeTokenizer()
+    messages = [{"role": "user", "content": "hello"}]
+    text_tokens = tokenizer("hello", return_tensors="pt")
+    rendered = cast(
+        str,
+        tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=add_generation_prompt,
+        ),
+    )
+    message_tokens = tokenizer(rendered, return_tensors="pt")
+    return [
+        ("string", "hello", text_tokens),
+        ("text-mapping", {"text": "hello"}, text_tokens),
+        ("token-mapping", text_tokens, text_tokens),
+        ("messages-mapping", {"messages": messages}, message_tokens),
+        ("message-dict", messages[0], message_tokens),
+        ("message-list", messages, message_tokens),
+    ]
+
+
+def filter_forward_inputs(
+    model: nn.Module,
+    kwargs: dict[str, torch.Tensor],
+) -> dict[str, torch.Tensor]:
+    """Filter kwargs down to what ``model.forward`` accepts."""
+
+    signature = inspect.signature(model.forward)
+    if any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in signature.parameters.values()
+    ):
+        return dict(kwargs)
+    allowed = set(signature.parameters)
+    return {key: value for key, value in kwargs.items() if key in allowed}
+
+
+def generate_lengths(output: Any) -> tuple[list[int], list[int]]:
+    prompt_value = output.prompt_length
+    generated_value = output.generated_length
+    prompt_lengths = (
+        [int(prompt_value)]
+        if isinstance(prompt_value, int)
+        else [int(length) for length in prompt_value]
+    )
+    generated_lengths = (
+        [int(generated_value)]
+        if isinstance(generated_value, int)
+        else [int(length) for length in generated_value]
+    )
+    return prompt_lengths, generated_lengths
+
+
+def generate_row(output: Any, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
+    prompt_lengths, generated_lengths = generate_lengths(output)
+    sequences = cast(torch.Tensor, output.sequences)
+    generated_ids = cast(torch.Tensor, output.generated_ids)
+    total = prompt_lengths[idx] + generated_lengths[idx]
+    return (
+        sequences[idx : idx + 1, :total],
+        generated_ids[idx : idx + 1, : generated_lengths[idx]],
+    )
+
+
+def generate_activation_row(
+    output: Any,
+    site: Any,
+    idx: int,
+    *,
+    capture: str,
+) -> torch.Tensor:
+    prompt_lengths, generated_lengths = generate_lengths(output)
+    width = (
+        generated_lengths[idx]
+        if capture == "generated"
+        else prompt_lengths[idx] + generated_lengths[idx]
+    )
+    activations = cast(torch.Tensor, output[site])
+    return activations[idx : idx + 1, :width]
 
 
 def _reshape_heads(tensor: torch.Tensor, n_heads: int) -> torch.Tensor:

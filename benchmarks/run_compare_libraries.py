@@ -14,6 +14,7 @@ from .compare_libraries import (
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", default="meta-llama/Llama-3.1-8B-Instruct")
+    parser.add_argument("--model-family", default="custom")
     parser.add_argument("--device", default="auto")
     parser.add_argument("--dtype", default="bfloat16", choices=("float32", "float16", "bfloat16"))
     parser.add_argument("--seed", type=int, default=11)
@@ -30,6 +31,7 @@ def main() -> int:
     report = run_compare_benchmarks(
         CompareConfig(
             model_name=args.model,
+            model_family=args.model_family,
             device=args.device,
             dtype=args.dtype,
             seed=args.seed,

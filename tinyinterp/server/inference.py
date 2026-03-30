@@ -7,7 +7,7 @@ import time
 import uuid
 from collections import defaultdict
 from collections.abc import Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -15,7 +15,15 @@ import torch
 
 from ..context import get_debug
 from ..model import Model
-from ..output import Output
+from ..output import (
+    GenerateOutput,
+    Output,
+    generate_output_from_path_activations,
+    generate_output_from_value,
+    merge_generate_outputs,
+    output_from_path_activations,
+)
+from ..requests import RequestBatch, normalize_requests
 from .collector import Collector
 from .decode_engine import DecodeEngine
 from .plans import CompiledPlan, OutputPolicyLike, SiteLike, compile_plan
@@ -28,7 +36,6 @@ from .runtime import (
     extract_last_token_logits,
     filter_supported_kwargs,
     gpu_stats,
-    is_static_cache,
     model_dtype,
     move_tensors_to,
     prompt_tokens_from_mapping,
@@ -55,17 +62,28 @@ class _OpStats:
 
 
 @dataclass(slots=True)
-class _RequestBatch:
-    rows: list[dict[str, torch.Tensor]]
-    batch: dict[str, torch.Tensor]
+class _RemoteGradHandle:
+    id: str
+    activations: dict[str, torch.Tensor]
+    logits: torch.Tensor | None
+    args: tuple[Any, ...]
+    kwargs: dict[str, Any]
 
 
-class Server:
-    """Own one local ``ti.Model`` plus specialized prefill and decode engines."""
+def _output_from_plan_result(result: PlanResult) -> Output:
+    return output_from_path_activations(
+        result,
+        result.activations,
+        completed_forward=result.completed_forward,
+    )
+
+
+class _RuntimeCore:
+    """Shared lowered runtime used by local and deployed tinyinterp execution."""
 
     def __init__(
         self,
-        wrapped: torch.nn.Module | str,
+        wrapped: torch.nn.Module | str | Model,
         *,
         rename: Mapping[str, str] | None = None,
         tokenizer: Any | None = None,
@@ -77,13 +95,24 @@ class Server:
         collect_token_budget: int | None = None,
         max_kv_cache_mb: float | None = None,
         max_activation_capture_mb: float | None = None,
+        gpu_fraction: float = 0.9,
+        cpu_fraction: float = 0.8,
         **load_kwargs: Any,
     ) -> None:
-        if attn_backend is not None and "attn_implementation" not in load_kwargs:
-            load_kwargs["attn_implementation"] = attn_backend
-        self.model = Model(wrapped, rename=rename, tokenizer=tokenizer, **load_kwargs)
+        if isinstance(wrapped, Model):
+            if rename is not None or tokenizer is not None or load_kwargs:
+                raise TypeError(
+                    "_RuntimeCore(Model) does not accept rename=, tokenizer=, or loading kwargs."
+                )
+            self._model = wrapped
+        else:
+            if attn_backend is not None and "attn_implementation" not in load_kwargs:
+                load_kwargs["attn_implementation"] = attn_backend
+            self._model = Model(wrapped, rename=rename, tokenizer=tokenizer, **load_kwargs)
         if device is not None:
-            self.model.wrapped.to(device)
+            self._model.wrapped.to(device)
+        self._gpu_fraction = gpu_fraction
+        self._cpu_fraction = cpu_fraction
         self._plans: dict[str, CompiledPlan] = {}
         self._sessions: dict[str, Session] = {}
         self._collectors: dict[str, Collector] = {}
@@ -106,9 +135,70 @@ class Server:
                 else int(max_activation_capture_mb * 1024 * 1024)
             ),
         )
-        self._execution_lock = threading.Lock()
+        self._runtime_lock = threading.Lock()
+        self._state_lock = threading.RLock()
+        self._metrics_lock = threading.Lock()
         self._decode_engine = DecodeEngine(self)
         self._prefill_engine = PrefillEngine(self, self._decode_engine)
+        self._budget: Any | None = None
+        self._serve_shutdown = threading.Event()
+        self._listen_socket: Any | None = None
+        self._listen_path: str | None = None
+        self._client_sockets: set[Any] = set()
+        self._client_lock = threading.Lock()
+        self._remote_value_count = 0
+        self._remote_value_lock = threading.Lock()
+        self._remote_grads: dict[str, _RemoteGradHandle] = {}
+        self._remote_grad_count = 0
+        self._remote_grad_lock = threading.Lock()
+
+    @property
+    def budget(self) -> Any:
+        """Lazy-initialized memory budget for server scheduling heuristics."""
+        if self._budget is None:
+            from .memory import MemoryBudget
+
+            self._budget = MemoryBudget(
+                self._model.wrapped,
+                self._primary_device(),
+                gpu_fraction=self._gpu_fraction,
+                cpu_fraction=self._cpu_fraction,
+            )
+        return self._budget
+
+    def serve(self, sock_path: str = "/tmp/tinyinterp.sock") -> None:
+        """Start a persistent server on a Unix socket. Blocks forever."""
+        from .remote import serve as _serve
+
+        _serve(self, sock_path)
+
+    def close(self) -> None:
+        """Stop serving, close active clients, and drop runtime-owned state."""
+        self._serve_shutdown.set()
+        if self._listen_socket is not None:
+            try:
+                self._listen_socket.close()
+            except OSError:
+                pass
+            self._listen_socket = None
+        with self._client_lock:
+            sockets = list(self._client_sockets)
+            self._client_sockets.clear()
+        for client in sockets:
+            try:
+                client.close()
+            except OSError:
+                pass
+        with self._runtime_lock:
+            with self._state_lock:
+                self._collectors.clear()
+                sessions = list(self._sessions.values())
+                self._sessions.clear()
+            for session in sessions:
+                self._decode_engine.close_session(session)
+        with self._remote_grad_lock:
+            self._remote_grads.clear()
+            self._remote_grad_count = 0
 
     def compile(
         self,
@@ -118,8 +208,9 @@ class Server:
         output: OutputPolicyLike = None,
     ) -> CompiledPlan:
         with self._track("compile"):
-            plan = compile_plan(self.model, get=get, mapping=mapping, output=output)
-            self._plans[plan.id] = plan
+            plan = compile_plan(self._model, get=get, mapping=mapping, output=output)
+            with self._state_lock:
+                self._plans[plan.id] = plan
             return plan
 
     def call(
@@ -131,13 +222,11 @@ class Server:
     ) -> PlanResult:
         compiled = self._resolve_plan(plan)
         with self._scheduled("call"):
-            with torch.inference_mode():
-                result = self.model(
-                    *move_tensors_to(tuple(args), self._primary_device()),
-                    get=list(compiled.get_proxies),
-                    map=compiled.map_dict,
-                    **cast(dict[str, Any], move_tensors_to(dict(kwargs), self._primary_device())),
-                )
+            result = self._execute_plan(
+                compiled,
+                args=move_tensors_to(tuple(args), self._primary_device()),
+                kwargs=cast(dict[str, Any], move_tensors_to(dict(kwargs), self._primary_device())),
+            )
             return self._build_plan_result(
                 compiled,
                 result,
@@ -145,6 +234,51 @@ class Server:
                 activations_to_cpu=compiled.output.activations_to_cpu,
                 logits_to_cpu=compiled.output.logits_to_cpu,
             )
+
+    def call_grad(
+        self,
+        plan: CompiledPlan | str | None = None,
+        /,
+        *args: Any,
+        **kwargs: Any,
+    ) -> tuple[str, PlanResult]:
+        compiled = self._resolve_plan(plan)
+        device = self._primary_device()
+        grad_args = move_tensors_to(tuple(args), device)
+        grad_kwargs = cast(dict[str, Any], move_tensors_to(dict(kwargs), device))
+        with self._scheduled("call_grad"):
+            result = self._execute_plan(
+                compiled,
+                args=grad_args,
+                kwargs=grad_kwargs,
+                grad=True,
+            )
+        plan_result = self._build_plan_result(
+            compiled,
+            result,
+            logits_slice=False,
+            activations_to_cpu=False,
+            logits_to_cpu=False,
+        )
+        if not plan_result.activations and plan_result.logits is None:
+            raise ValueError("Remote grad=True requires logits or captured activations.")
+        if isinstance(plan_result.logits, torch.Tensor) and plan_result.logits.requires_grad:
+            plan_result.logits.retain_grad()
+        grad_id = uuid.uuid4().hex
+        with self._remote_grad_lock:
+            self._remote_grads[grad_id] = _RemoteGradHandle(
+                id=grad_id,
+                activations={
+                    path: value
+                    for path, value in plan_result.activations.items()
+                    if isinstance(value, torch.Tensor)
+                },
+                logits=plan_result.logits,
+                args=tuple(grad_args),
+                kwargs=dict(grad_kwargs),
+            )
+            self._remote_grad_count += 1
+        return grad_id, plan_result
 
     def call_many(
         self,
@@ -163,12 +297,56 @@ class Server:
         batch_kwargs = self._merge_batch_kwargs(normalized.batch, kwargs)
         result = self.call(
             compiled,
-            **filter_supported_kwargs(self.model.wrapped, batch_kwargs),
+            **filter_supported_kwargs(self._model.wrapped, batch_kwargs),
         )
         return self._split_plan_result(
             result,
             batch_size=len(normalized.rows),
         )
+
+    def fetch_grad_value(self, grad_id: str, target: str | int) -> torch.Tensor:
+        tensor = self._resolve_grad_target(grad_id, target)
+        return to_cpu(tensor, enabled=True)
+
+    def fetch_target_grad(self, grad_id: str, target: str | int) -> torch.Tensor | None:
+        tensor = self._resolve_grad_target(grad_id, target)
+        if not isinstance(tensor.grad, torch.Tensor):
+            return None
+        return to_cpu(tensor.grad, enabled=True)
+
+    def fetch_input_grads(self, grad_id: str) -> dict[str, Any]:
+        handle = self._resolve_grad_handle(grad_id)
+        grads: dict[str, Any] = {}
+        if handle.args:
+            grads["args"] = tuple(self._grad_tree(value) for value in handle.args)
+        for key, value in handle.kwargs.items():
+            grads[key] = self._grad_tree(value)
+        return grads
+
+    def backward_grad(
+        self,
+        grad_id: str,
+        target: str | int,
+        gradient: torch.Tensor | None = None,
+    ) -> None:
+        tensor = self._resolve_grad_target(grad_id, target)
+        grad_tensor = None
+        if isinstance(gradient, torch.Tensor):
+            grad_tensor = cast(torch.Tensor, move_tensors_to(gradient, tensor.device))
+        if grad_tensor is None:
+            if tensor.numel() != 1:
+                raise ValueError("Gradient tensor is required for non-scalar remote backward().")
+            tensor.backward()
+            return
+        tensor.backward(grad_tensor)
+
+    def release_grad(self, grad_id: str) -> bool:
+        with self._remote_grad_lock:
+            handle = self._remote_grads.pop(grad_id, None)
+            if handle is None:
+                return False
+            self._remote_grad_count = max(self._remote_grad_count - 1, 0)
+            return True
 
     def open_collector(
         self,
@@ -192,7 +370,7 @@ class Server:
         if stop_at_last_get and compiled.map_dict:
             raise ValueError("Collector fast path does not support map=.")
         if activations_to_cpu is None:
-            activations_to_cpu = compiled.output.activations_to_cpu or True
+            activations_to_cpu = compiled.output.activations_to_cpu
         if token_budget is None:
             token_budget = self._scheduler.collect_token_budget
         collector = Collector(
@@ -209,7 +387,8 @@ class Server:
             mmap_path=mmap_path,
             server=self,
         )
-        self._collectors[collector.id] = collector
+        with self._state_lock:
+            self._collectors[collector.id] = collector
         return collector
 
     def collect_batch(
@@ -224,6 +403,7 @@ class Server:
         self,
         collector: Collector | str,
         requests: Sequence[Any],
+        **kwargs: Any,
     ) -> list[PlanResult]:
         state = self._resolve_collector(collector)
         normalized = self._normalize_requests(
@@ -231,10 +411,7 @@ class Server:
             add_generation_prompt=False,
             pad_side="right",
         )
-        result = self.collect_batch(
-            state,
-            normalized.batch,
-        )
+        result = self.collect_batch(state, self._merge_batch_kwargs(normalized.batch, kwargs))
         return self._split_plan_result(
             result,
             batch_size=len(normalized.rows),
@@ -242,7 +419,8 @@ class Server:
 
     def close_collector(self, collector: Collector | str) -> None:
         state = self._resolve_collector(collector)
-        self._collectors.pop(state.id, None)
+        with self._state_lock:
+            self._collectors.pop(state.id, None)
 
     def open_session(
         self,
@@ -255,7 +433,7 @@ class Server:
         compiled = self._resolve_plan(plan)
         if cache not in {"dynamic", "static", "none"}:
             raise ValueError("Server supports cache='dynamic', 'static', or 'none'.")
-        if cache == "static" and not supports_static_cache_model(self.model.wrapped):
+        if cache == "static" and not supports_static_cache_model(self._model.wrapped):
             raise ValueError("Static cache is not supported for this model/configuration.")
         sample_cfg = SamplingConfig(
             do_sample=bool((sampling or {}).get("do_sample", False)),
@@ -270,12 +448,13 @@ class Server:
             cache_mode=cache,
             sampling=sample_cfg,
             use_hf_cache=cache != "none"
-            and callable(getattr(self.model.wrapped, "prepare_inputs_for_generation", None)),
+            and callable(getattr(self._model.wrapped, "prepare_inputs_for_generation", None)),
             max_total_tokens=max_total_tokens,
             max_new_tokens_hint=max_new_tokens_hint,
             cache=None,
         )
-        self._sessions[session.id] = session
+        with self._state_lock:
+            self._sessions[session.id] = session
         return session
 
     def prefill(
@@ -334,7 +513,7 @@ class Server:
             raise ValueError("max_new_tokens must be >= 1.")
         resolved = [self._resolve_session(session) for session in sessions]
         if not resolved:
-            return []
+            raise ValueError("decode() expects at least one session.")
         total_prompt_tokens = sum(max(session.current_length, 1) for session in resolved)
         richest_plan = max(resolved, key=lambda session: len(session.plan.get_paths)).plan
         decode_estimate = self._estimate_prefill(
@@ -358,9 +537,11 @@ class Server:
             )
 
     def close_session(self, session: Session | str) -> None:
-        state = self._resolve_session(session)
-        self._decode_engine.close_session(state)
-        self._sessions.pop(state.id, None)
+        with self._runtime_lock:
+            state = self._resolve_session(session)
+            self._decode_engine.close_session(state)
+            with self._state_lock:
+                self._sessions.pop(state.id, None)
 
     def generate(
         self,
@@ -373,8 +554,9 @@ class Server:
         do_sample: bool = False,
         temperature: float = 1.0,
         top_k: int | None = None,
+        capture: str = "all",
         **kwargs: Any,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | GenerateOutput:
         if cache != "dynamic":
             raise ValueError(
                 "Server.generate() supports cache='dynamic' only. "
@@ -391,7 +573,7 @@ class Server:
                 top_k=top_k,
                 **kwargs,
             )
-        return self._generate_direct_batched(
+        result = self._generate_direct_batched(
             compiled,
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -399,8 +581,13 @@ class Server:
             do_sample=do_sample,
             temperature=temperature,
             top_k=top_k,
+            capture=capture,
             **kwargs,
         )
+        if not compiled.output.activations:
+            assert isinstance(result.sequences, torch.Tensor)
+            return result.sequences
+        return self._generate_output_from_result(result)
 
     def generate_many(
         self,
@@ -413,8 +600,9 @@ class Server:
         do_sample: bool = False,
         temperature: float = 1.0,
         top_k: int | None = None,
+        capture: str = "all",
         **kwargs: Any,
-    ) -> list[torch.Tensor]:
+    ) -> GenerateOutput:
         if cache != "dynamic":
             raise ValueError(
                 "Server.generate_many() supports cache='dynamic' only. "
@@ -426,22 +614,28 @@ class Server:
             add_generation_prompt=True,
             pad_side="left",
         )
-        if not callable(getattr(self.model.wrapped, "prepare_inputs_for_generation", None)):
+        if not callable(getattr(self._model.wrapped, "prepare_inputs_for_generation", None)):
             lengths = {int(row["input_ids"].shape[-1]) for row in normalized.rows}
             if len(lengths) > 1:
-                return [
-                    self.generate(
-                        input_ids=row["input_ids"],
-                        attention_mask=row["attention_mask"],
-                        plan=compiled,
-                        max_new_tokens=max_new_tokens,
-                        do_sample=do_sample,
-                        temperature=temperature,
-                        top_k=top_k,
-                        **kwargs,
-                    )
-                    for row in normalized.rows
-                ]
+                return merge_generate_outputs(
+                    [
+                        generate_output_from_value(
+                            self.generate(
+                                input_ids=row["input_ids"],
+                                attention_mask=row["attention_mask"],
+                                plan=compiled,
+                                max_new_tokens=max_new_tokens,
+                                do_sample=do_sample,
+                                temperature=temperature,
+                                top_k=top_k,
+                                capture=capture,
+                                **kwargs,
+                            ),
+                            prompt_length=int(row["input_ids"].shape[-1]),
+                        )
+                        for row in normalized.rows
+                    ]
+                )
         if self._is_plain_generate_plan(compiled):
             output = self._generate_via_wrapped(
                 input_ids=normalized.batch["input_ids"],
@@ -452,6 +646,8 @@ class Server:
                 top_k=top_k,
                 **kwargs,
             )
+            if compiled.output.activations:
+                raise RuntimeError("Plain wrapped generation cannot return captured activations.")
         else:
             output = self._generate_direct_batched(
                 compiled,
@@ -461,38 +657,68 @@ class Server:
                 do_sample=do_sample,
                 temperature=temperature,
                 top_k=top_k,
+                capture=capture,
                 **kwargs,
             )
-        generated = output[:, normalized.batch["input_ids"].shape[-1] :]
-        eos_ids = eos_token_ids(self.model.wrapped)
-        outputs: list[torch.Tensor] = []
+        if compiled.output.activations:
+            output.metadata["left_padded"] = True
+            split = self._split_plan_result(output, batch_size=len(normalized.rows))
+            return merge_generate_outputs(
+                [
+                    self._generate_output_from_result(
+                        item,
+                        left_padded=True,
+                    )
+                    for item in split
+                ]
+            )
+        sequences = (
+            output.sequences
+            if isinstance(output, PlanResult)
+            else cast(torch.Tensor, output)
+        )
+        assert isinstance(sequences, torch.Tensor)
+        generated = sequences[:, normalized.batch["input_ids"].shape[-1] :]
+        eos_ids = eos_token_ids(self._model.wrapped)
+        outputs: list[GenerateOutput] = []
         for idx, prompt in enumerate(normalized.rows):
-            row_generated = generated[idx : idx + 1]
+            row_generated = self._trim_generated_tokens(generated[idx : idx + 1], eos_ids)
             outputs.append(
-                torch.cat(
-                    [
-                        prompt["input_ids"],
-                        self._trim_generated_tokens(row_generated, eos_ids),
-                    ],
-                    dim=-1,
+                generate_output_from_path_activations(
+                    torch.cat([prompt["input_ids"], row_generated], dim=-1),
+                    row_generated,
+                    {},
+                    prompt_length=int(prompt["input_ids"].shape[-1]),
+                    generated_length=int(row_generated.shape[-1]),
                 )
             )
-        return outputs
+        return merge_generate_outputs(outputs)
 
     def stats(self) -> dict[str, Any]:
-        total_calls = sum(entry.calls for entry in self._stats.values())
-        total_errors = sum(entry.errors for entry in self._stats.values())
-        total_time_ns = sum(entry.total_ns for entry in self._stats.values())
+        with self._metrics_lock:
+            total_calls = sum(entry.calls for entry in self._stats.values())
+            total_errors = sum(entry.errors for entry in self._stats.values())
+            total_time_ns = sum(entry.total_ns for entry in self._stats.values())
+            peak_inflight = max((entry.peak_inflight for entry in self._stats.values()), default=0)
+            inflight = sum(entry.inflight for entry in self._stats.values())
+            queued = sum(entry.current_depth for entry in self._queues.values())
+            queue_peak = max((entry.peak_depth for entry in self._queues.values()), default=0)
+            queue_wait_ns = sum(entry.total_queue_wait_ns for entry in self._queues.values())
+            service_ns = sum(entry.total_service_ns for entry in self._queues.values())
+            last_request_type = self._last_request_type
+            last_admission = self._last_admission
+            queues = {name: entry.snapshot() for name, entry in self._queues.items()}
+        with self._state_lock:
+            active_sessions = len(self._sessions)
+            active_collectors = len(self._collectors)
+        with self._client_lock:
+            connected_clients = len(self._client_sockets)
         mean_request_ms = 0.0 if total_calls == 0 else (total_time_ns / total_calls) / 1e6
-        peak_inflight = max((entry.peak_inflight for entry in self._stats.values()), default=0)
-        inflight = sum(entry.inflight for entry in self._stats.values())
-        queued = sum(entry.current_depth for entry in self._queues.values())
-        queue_peak = max((entry.peak_depth for entry in self._queues.values()), default=0)
-        queue_wait_ns = sum(entry.total_queue_wait_ns for entry in self._queues.values())
-        service_ns = sum(entry.total_service_ns for entry in self._queues.values())
         uptime_ns = max(time.perf_counter_ns() - self._server_started_ns, 1)
         return {
-            "connected_clients": 0,
+            "connected_clients": connected_clients,
+            "live_remote_values": self._remote_value_count,
+            "live_remote_grads": self._remote_grad_count,
             "queued_requests": queued,
             "queue_peak": queue_peak,
             "requests_served": total_calls,
@@ -500,11 +726,11 @@ class Server:
             "mean_request_ms": mean_request_ms,
             "mean_queue_wait_ms": 0.0 if total_calls == 0 else (queue_wait_ns / total_calls) / 1e6,
             "scheduler_utilization": min(service_ns / uptime_ns, 1.0),
-            "last_request_type": self._last_request_type,
-            "active_sessions": len(self._sessions),
-            "active_collectors": len(self._collectors),
-            "last_admission": self._last_admission,
-            "queues": {name: entry.snapshot() for name, entry in self._queues.items()},
+            "last_request_type": last_request_type,
+            "active_sessions": active_sessions,
+            "active_collectors": active_collectors,
+            "last_admission": last_admission,
+            "queues": queues,
             "peak_inflight": peak_inflight,
             "inflight_requests": inflight,
             **gpu_stats(self._primary_device()),
@@ -516,15 +742,49 @@ class Server:
         if isinstance(plan, CompiledPlan):
             return plan
         try:
-            return self._plans[plan]
+            with self._state_lock:
+                return self._plans[plan]
         except KeyError as exc:
             raise KeyError(f"Unknown plan id {plan!r}.") from exc
+
+    def _resolve_grad_handle(self, grad_id: str) -> _RemoteGradHandle:
+        with self._remote_grad_lock:
+            handle = self._remote_grads.get(grad_id)
+        if handle is None:
+            raise KeyError(f"Unknown grad handle {grad_id!r}.")
+        return handle
+
+    def _resolve_grad_target(self, grad_id: str, target: str | int) -> torch.Tensor:
+        handle = self._resolve_grad_handle(grad_id)
+        if target == "logits":
+            if not isinstance(handle.logits, torch.Tensor):
+                raise KeyError("Grad handle does not expose logits.")
+            return handle.logits
+        tensor = handle.activations.get(str(target))
+        if not isinstance(tensor, torch.Tensor):
+            raise KeyError(f"Grad handle does not expose target {target!r}.")
+        return tensor
+
+    @staticmethod
+    def _grad_tree(value: Any) -> Any:
+        if isinstance(value, torch.Tensor):
+            if not value.requires_grad or not isinstance(value.grad, torch.Tensor):
+                return None
+            return to_cpu(value.grad, enabled=True)
+        if isinstance(value, tuple):
+            return tuple(_RuntimeCore._grad_tree(item) for item in value)
+        if isinstance(value, list):
+            return [_RuntimeCore._grad_tree(item) for item in value]
+        if isinstance(value, dict):
+            return {key: _RuntimeCore._grad_tree(item) for key, item in value.items()}
+        return None
 
     def _resolve_session(self, session: Session | str) -> Session:
         if isinstance(session, Session):
             return session
         try:
-            return self._sessions[session]
+            with self._state_lock:
+                return self._sessions[session]
         except KeyError as exc:
             raise KeyError(f"Unknown session id {session!r}.") from exc
 
@@ -532,12 +792,13 @@ class Server:
         if isinstance(collector, Collector):
             return collector
         try:
-            return self._collectors[collector]
+            with self._state_lock:
+                return self._collectors[collector]
         except KeyError as exc:
             raise KeyError(f"Unknown collector id {collector!r}.") from exc
 
     def _primary_device(self) -> torch.device:
-        device = self.model.device
+        device = self._model.device
         if isinstance(device, tuple):
             return device[0]
         return device
@@ -550,9 +811,9 @@ class Server:
     ) -> AdmissionEstimate:
         return estimate_admission(
             queue="collect_batch",
-            wrapped=self.model.wrapped,
+            wrapped=self._model.wrapped,
             plan=plan,
-            dtype=model_dtype(self.model.wrapped),
+            dtype=model_dtype(self._model.wrapped),
             batch_size=_batch_size_from_mapping(batch),
             prompt_tokens=prompt_tokens_from_mapping(batch),
             projected_decode_tokens=0,
@@ -571,9 +832,9 @@ class Server:
     ) -> AdmissionEstimate:
         return estimate_admission(
             queue="prefill",
-            wrapped=self.model.wrapped,
+            wrapped=self._model.wrapped,
             plan=plan,
-            dtype=model_dtype(self.model.wrapped),
+            dtype=model_dtype(self._model.wrapped),
             batch_size=batch_size,
             prompt_tokens=prompt_tokens,
             projected_decode_tokens=projected_decode_tokens,
@@ -592,51 +853,85 @@ class Server:
         batch_tokens: int = 0,
     ) -> Iterator[None]:
         queued_at = time.perf_counter_ns()
-        queue = self._queues[op]
-        queue.enqueued += 1
-        queue.current_depth += 1
-        queue.peak_depth = max(queue.peak_depth, queue.current_depth)
-        if estimate is not None:
-            self._last_admission = estimate.snapshot()
-            if not estimate.admitted:
-                queue.rejected += 1
-                queue.current_depth = max(queue.current_depth - 1, 0)
-                raise MemoryError(f"{op} rejected by admission control: {estimate.reason}.")
-        with self._execution_lock:
+        with self._metrics_lock:
+            queue = self._queues[op]
+            queue.enqueued += 1
+            queue.current_depth += 1
+            queue.peak_depth = max(queue.peak_depth, queue.current_depth)
+            if estimate is not None:
+                self._last_admission = estimate.snapshot()
+                if not estimate.admitted:
+                    queue.rejected += 1
+                    queue.current_depth = max(queue.current_depth - 1, 0)
+                    raise MemoryError(f"{op} rejected by admission control: {estimate.reason}.")
+        guard = self._guard_for_op(op)
+        with guard if guard is not None else nullcontext():
             started_at = time.perf_counter_ns()
-            queue.current_depth = max(queue.current_depth - 1, 0)
-            queue.started += 1
-            queue.total_queue_wait_ns += started_at - queued_at
-            queue.total_tokens += batch_tokens
-            queue.total_batches += 1
-            queue.total_sessions += batch_size
-            queue.max_batch_sessions = max(queue.max_batch_sessions, batch_size)
+            with self._metrics_lock:
+                queue = self._queues[op]
+                queue.current_depth = max(queue.current_depth - 1, 0)
+                queue.started += 1
+                queue.total_queue_wait_ns += started_at - queued_at
+                queue.total_tokens += batch_tokens
+                queue.total_batches += 1
+                queue.total_sessions += batch_size
+                queue.max_batch_sessions = max(queue.max_batch_sessions, batch_size)
             with self._track(op):
                 try:
                     yield
                 finally:
-                    queue.completed += 1
-                    queue.total_service_ns += time.perf_counter_ns() - started_at
+                    with self._metrics_lock:
+                        queue = self._queues[op]
+                        queue.completed += 1
+                        queue.total_service_ns += time.perf_counter_ns() - started_at
 
     @contextmanager
     def _track(self, op: str) -> Iterator[None]:
         started = time.perf_counter_ns()
-        entry = self._stats[op]
-        entry.inflight += 1
-        entry.peak_inflight = max(entry.peak_inflight, entry.inflight)
-        self._last_request_type = op
+        with self._metrics_lock:
+            entry = self._stats[op]
+            entry.inflight += 1
+            entry.peak_inflight = max(entry.peak_inflight, entry.inflight)
+            self._last_request_type = op
         if get_debug() >= 1:
             print(f"[ti] server: op={op}")
         try:
             yield
         except Exception:
-            entry.errors += 1
+            with self._metrics_lock:
+                self._stats[op].errors += 1
             raise
         finally:
             elapsed_ns = time.perf_counter_ns() - started
-            entry.calls += 1
-            entry.total_ns += elapsed_ns
-            entry.inflight = max(entry.inflight - 1, 0)
+            with self._metrics_lock:
+                current = self._stats[op]
+                current.calls += 1
+                current.total_ns += elapsed_ns
+                current.inflight = max(current.inflight - 1, 0)
+
+    def _guard_for_op(self, op: str) -> threading.Lock | None:
+        if op == "decode":
+            return self._runtime_lock
+        return None
+
+    def _execute_plan(
+        self,
+        plan: CompiledPlan,
+        *,
+        args: tuple[Any, ...] = (),
+        kwargs: Mapping[str, Any] | None = None,
+        grad: bool = False,
+        stop_at_last_get: bool = False,
+    ) -> Any:
+        return self._model._execute_now(
+            args=tuple(args),
+            kwargs=dict(kwargs or {}),
+            get_proxies=list(plan.get_proxies),
+            map_proxies=dict(plan.map_dict),
+            grad=grad,
+            stop_at_last_get=stop_at_last_get,
+            always_output=True,
+        )
 
     def _prepare_inputs_for_generation(
         self,
@@ -646,7 +941,7 @@ class Server:
         cache: Any | None,
         extra_kwargs: Mapping[str, Any],
     ) -> dict[str, Any]:
-        wrapped = self.model.wrapped
+        wrapped = self._model.wrapped
         prepare = getattr(wrapped, "prepare_inputs_for_generation", None)
         if not callable(prepare):
             return {
@@ -657,16 +952,11 @@ class Server:
                 **dict(extra_kwargs),
             }
         prepare_kwargs = dict(extra_kwargs)
-        if (
-            cache is not None
-            and prepare_kwargs.get("cache_position") is None
-            and is_static_cache(cache)
-        ):
-            prepare_kwargs["cache_position"] = torch.arange(
-                int(cache.get_seq_length()),
-                int(cache.get_seq_length()) + input_ids.shape[-1],
-                device=input_ids.device,
-            )
+        prepare_kwargs.pop("use_cache", None)
+        prepare_kwargs.pop("pad_token_id", None)
+        cache_position = _cache_position(cache, input_ids)
+        if cache_position is not None and prepare_kwargs.get("cache_position") is None:
+            prepare_kwargs["cache_position"] = cache_position
         prepared = cast(
             Mapping[str, Any],
             prepare(
@@ -678,17 +968,8 @@ class Server:
             ),
         )
         normalized = {**prepared, "use_cache": True}
-        if (
-            cache is not None
-            and normalized.get("cache_position") is None
-            and is_static_cache(cache)
-        ):
-            start = int(cache.get_seq_length())
-            normalized["cache_position"] = torch.arange(
-                start,
-                start + input_ids.shape[-1],
-                device=input_ids.device,
-            )
+        if cache_position is not None and normalized.get("cache_position") is None:
+            normalized["cache_position"] = cache_position
         return normalized
 
     def _extract_activations(self, plan: CompiledPlan, result: Any) -> dict[str, Any]:
@@ -767,145 +1048,18 @@ class Server:
         *,
         add_generation_prompt: bool,
         pad_side: str,
-    ) -> _RequestBatch:
-        if not requests:
-            raise ValueError("Expected at least one request.")
-        rows = [
-            self._normalize_request_row(
-                request,
-                add_generation_prompt=add_generation_prompt,
-            )
-            for request in requests
-        ]
-        devices = {row["input_ids"].device for row in rows}
-        if len(devices) != 1:
-            raise ValueError("All batched requests must live on the same device.")
-        max_len = max(int(row["input_ids"].shape[-1]) for row in rows)
-        device = rows[0]["input_ids"].device
-        batch_input_ids = torch.full(
-            (len(rows), max_len),
-            self._pad_token_id(),
-            dtype=torch.long,
-            device=device,
-        )
-        batch_attention = torch.zeros(
-            (len(rows), max_len),
-            dtype=torch.long,
-            device=device,
-        )
-        for idx, row in enumerate(rows):
-            input_ids = row["input_ids"].view(-1)
-            attention_mask = row["attention_mask"].view(-1)
-            length = int(input_ids.shape[0])
-            if pad_side == "left":
-                batch_input_ids[idx, max_len - length :] = input_ids
-                batch_attention[idx, max_len - length :] = attention_mask
-            else:
-                batch_input_ids[idx, :length] = input_ids
-                batch_attention[idx, :length] = attention_mask
-        return _RequestBatch(
-            rows=rows,
-            batch={
-                "input_ids": batch_input_ids,
-                "attention_mask": batch_attention,
-            },
-        )
-
-    def _normalize_request_row(
-        self,
-        request: Any,
-        *,
-        add_generation_prompt: bool,
-    ) -> dict[str, torch.Tensor]:
-        if isinstance(request, str):
-            return self._encode_text_request(request)
-        if isinstance(request, Mapping):
-            if "input_ids" in request:
-                return self._normalize_token_request(request)
-            if "text" in request:
-                return self._encode_text_request(str(request["text"]))
-            if "messages" in request:
-                return self._encode_messages_request(
-                    request["messages"],
-                    add_generation_prompt=add_generation_prompt,
-                )
-            raise TypeError(
-                "Request mappings must contain `input_ids`, `text`, or `messages`."
-            )
-        if (
-            isinstance(request, Sequence)
-            and request
-            and all(isinstance(item, Mapping) for item in request)
-        ):
-            return self._encode_messages_request(
-                request,
-                add_generation_prompt=add_generation_prompt,
-            )
-        raise TypeError(
-            "Requests must be strings, chat-message lists, or mappings with "
-            "`input_ids`, `text`, or `messages`."
-        )
-
-    def _normalize_token_request(
-        self,
-        request: Mapping[str, Any],
-    ) -> dict[str, torch.Tensor]:
-        input_ids = self._coerce_token_tensor(request["input_ids"], name="input_ids")
-        attention_value = request.get("attention_mask")
-        if attention_value is None:
-            attention_mask = torch.ones_like(input_ids)
-        else:
-            attention_mask = self._coerce_token_tensor(
-                attention_value,
-                name="attention_mask",
-            )
-            if attention_mask.shape != input_ids.shape:
-                raise ValueError("attention_mask must match input_ids shape.")
-        return {
-            "input_ids": input_ids,
-            "attention_mask": attention_mask,
-        }
-
-    def _encode_text_request(self, text: str) -> dict[str, torch.Tensor]:
-        tokenizer = self._require_tokenizer()
-        encoded = tokenizer(text, return_tensors="pt")
-        return self._normalize_token_request(cast(Mapping[str, Any], encoded))
-
-    def _encode_messages_request(
-        self,
-        messages: Any,
-        *,
-        add_generation_prompt: bool,
-    ) -> dict[str, torch.Tensor]:
-        tokenizer = self._require_tokenizer()
-        apply_chat_template = getattr(tokenizer, "apply_chat_template", None)
-        if not callable(apply_chat_template):
-            raise TypeError("Server tokenizer does not support chat messages.")
-        rendered = apply_chat_template(
-            messages,
-            tokenize=False,
+    ) -> RequestBatch:
+        return normalize_requests(
+            requests,
+            tokenizer=self._model.tokenizer,
             add_generation_prompt=add_generation_prompt,
+            pad_side=pad_side,
+            pad_token_id=self._pad_token_id(),
+            owner="Server",
         )
-        return self._encode_text_request(str(rendered))
-
-    def _require_tokenizer(self) -> Any:
-        tokenizer = self.model.tokenizer
-        if tokenizer is None:
-            raise TypeError(
-                "Server requires a tokenizer for string or chat-message requests."
-            )
-        return tokenizer
-
-    def _coerce_token_tensor(self, value: Any, *, name: str) -> torch.Tensor:
-        tensor = torch.as_tensor(value, dtype=torch.long)
-        if tensor.ndim == 1:
-            return tensor.unsqueeze(0)
-        if tensor.ndim == 2 and tensor.shape[0] == 1:
-            return tensor
-        raise ValueError(f"{name} must be shape [seq] or [1, seq].")
 
     def _pad_token_id(self) -> int:
-        tokenizer = self.model.tokenizer
+        tokenizer = self._model.tokenizer
         if tokenizer is not None:
             pad_token_id = getattr(tokenizer, "pad_token_id", None)
             if isinstance(pad_token_id, int):
@@ -915,7 +1069,7 @@ class Server:
                 return eos_token_id
             if isinstance(eos_token_id, (list, tuple)) and eos_token_id:
                 return int(eos_token_id[0])
-        config = getattr(self.model.wrapped, "config", None)
+        config = getattr(self._model.wrapped, "config", None)
         if config is not None:
             pad_token_id = getattr(config, "pad_token_id", None)
             if isinstance(pad_token_id, int):
@@ -942,10 +1096,10 @@ class Server:
         top_k: int | None,
         **kwargs: Any,
     ) -> torch.Tensor:
-        generate_fn = getattr(self.model.wrapped, "generate", None)
+        generate_fn = getattr(self._model.wrapped, "generate", None)
         if not callable(generate_fn):
             raise AttributeError(
-                f"Wrapped model {type(self.model.wrapped).__name__} does not define generate()."
+                f"Wrapped model {type(self._model.wrapped).__name__} does not define generate()."
             )
         device = self._primary_device()
         batch_input_ids = cast(torch.Tensor, move_tensors_to(input_ids, device))
@@ -988,10 +1142,13 @@ class Server:
         do_sample: bool,
         temperature: float,
         top_k: int | None,
+        capture: str,
         **kwargs: Any,
-    ) -> torch.Tensor:
+    ) -> PlanResult:
         if max_new_tokens < 1:
             raise ValueError("max_new_tokens must be >= 1.")
+        if capture not in {"all", "generated"}:
+            raise ValueError("generate(..., capture=...) must be 'all' or 'generated'.")
         source_device = input_ids.device
         device = self._primary_device()
         batch_input_ids = cast(torch.Tensor, move_tensors_to(input_ids, device))
@@ -1000,16 +1157,26 @@ class Server:
             like=batch_input_ids,
             device=device,
         )
+        prompt_attention = batch_attention.clone()
         extra_kwargs = cast(dict[str, Any], move_tensors_to(dict(kwargs), device))
+        requested_use_cache = extra_kwargs.pop("use_cache", None)
         sampling = SamplingConfig(
             do_sample=do_sample,
             temperature=temperature,
             top_k=top_k,
         )
-        use_cache = callable(getattr(self.model.wrapped, "prepare_inputs_for_generation", None))
-        eos_ids = eos_token_ids(self.model.wrapped)
-        pad_token_id = self._pad_token_id()
+        use_cache = callable(getattr(self._model.wrapped, "prepare_inputs_for_generation", None))
+        if requested_use_cache is not None:
+            use_cache = use_cache and bool(requested_use_cache)
+        eos_ids = eos_token_ids(self._model.wrapped)
+        requested_pad_token_id = extra_kwargs.pop("pad_token_id", None)
+        pad_token_id = self._pad_token_id() if requested_pad_token_id is None else int(
+            requested_pad_token_id
+        )
         batch_size = int(batch_input_ids.shape[0])
+        generated_steps: list[torch.Tensor] = []
+        generated_activations: dict[str, list[torch.Tensor]] = {}
+        prompt_activations: dict[str, Any] = {}
         with self._scheduled(
             "generate",
             batch_size=batch_size,
@@ -1022,11 +1189,12 @@ class Server:
                     "use_cache": use_cache,
                     **extra_kwargs,
                 }
-                output = self.model(
-                    get=list(plan.get_proxies),
-                    map=plan.map_dict,
-                    **filter_supported_kwargs(self.model.wrapped, prepared),
+                output = self._execute_plan(
+                    plan,
+                    kwargs=filter_supported_kwargs(self._model.wrapped, prepared),
                 )
+                if plan.output.activations:
+                    prompt_activations = self._extract_activations(plan, output)
                 cache = getattr(
                     output._model_output if isinstance(output, Output) else output,
                     "past_key_values",
@@ -1034,20 +1202,22 @@ class Server:
                 )
                 logits = extract_last_token_logits(output)
                 finished = torch.zeros(batch_size, dtype=torch.bool, device=device)
-                steps: list[torch.Tensor] = []
                 for step_idx in range(max_new_tokens):
                     next_token = sample_next_token(logits, sampling)
                     if finished.any():
                         filler = torch.full_like(next_token, pad_token_id)
                         next_token = torch.where(finished.unsqueeze(-1), filler, next_token)
-                    steps.append(next_token)
+                    generated_steps.append(next_token)
                     if eos_ids:
                         for idx in range(batch_size):
                             if not bool(finished[idx]) and contains_eos(
                                 next_token[idx : idx + 1], eos_ids
                             ):
                                 finished[idx] = True
-                    if step_idx == max_new_tokens - 1 or bool(finished.all()):
+                    needs_trailing_forward = plan.output.activations
+                    if step_idx == max_new_tokens - 1 and not needs_trailing_forward:
+                        break
+                    if bool(finished.all()) and not needs_trailing_forward:
                         break
                     batch_attention = torch.cat(
                         [
@@ -1068,29 +1238,72 @@ class Server:
                             extra_kwargs=extra_kwargs,
                         )
                     else:
-                        full_tokens = torch.cat([batch_input_ids, *steps], dim=-1)
+                        full_tokens = torch.cat([batch_input_ids, *generated_steps], dim=-1)
                         prepared = {
                             "input_ids": full_tokens,
                             "attention_mask": batch_attention,
                             **extra_kwargs,
                         }
-                    output = self.model(
-                        get=list(plan.get_proxies),
-                        map=plan.map_dict,
-                        **filter_supported_kwargs(self.model.wrapped, prepared),
+                    output = self._execute_plan(
+                        plan,
+                        kwargs=filter_supported_kwargs(self._model.wrapped, prepared),
                     )
+                    if plan.output.activations:
+                        for path, value in self._extract_activations(plan, output).items():
+                            if isinstance(value, torch.Tensor):
+                                generated_activations.setdefault(path, []).append(
+                                    value[:, -1:].detach()
+                                )
                     cache = getattr(
                         output._model_output if isinstance(output, Output) else output,
                         "past_key_values",
                         cache,
                     )
+                    if step_idx == max_new_tokens - 1 or bool(finished.all()):
+                        break
                     logits = extract_last_token_logits(output)
         generated = (
-            torch.cat(steps, dim=-1)
-            if steps
+            torch.cat(generated_steps, dim=-1)
+            if generated_steps
             else torch.empty((batch_size, 0), dtype=torch.long, device=device)
         )
-        return torch.cat([batch_input_ids, generated], dim=-1).to(device=source_device)
+        activations: dict[str, Any] = {}
+        if plan.output.activations:
+            prompt_lengths = [int(value) for value in prompt_attention.sum(dim=-1).tolist()]
+            generated_lengths = _generated_lengths(generated, eos_ids)
+            for path in sorted(set(prompt_activations).union(generated_activations)):
+                prompt_value = prompt_activations.get(path)
+                generated_value = _stack_generated_activation_slices(
+                    generated_activations.get(path, []),
+                    batch_size=batch_size,
+                    device=device,
+                )
+                if capture == "generated":
+                    activations[path] = generated_value
+                    continue
+                if (
+                    isinstance(prompt_value, torch.Tensor)
+                    and isinstance(generated_value, torch.Tensor)
+                ):
+                    activations[path] = torch.cat([prompt_value, generated_value], dim=1)
+                    continue
+                activations[path] = prompt_value if prompt_value is not None else generated_value
+        else:
+            prompt_lengths = [int(value) for value in prompt_attention.sum(dim=-1).tolist()]
+            generated_lengths = _generated_lengths(generated, eos_ids)
+        return PlanResult(
+            activations=activations,
+            token_ids=generated.to(device=source_device),
+            sequences=torch.cat([batch_input_ids, generated], dim=-1).to(device=source_device),
+            completed_forward=True,
+            metadata={
+                "capture": capture,
+                "prompt_lengths": prompt_lengths,
+                "generated_lengths": generated_lengths,
+                "prompt_width": int(prompt_attention.shape[-1]),
+                "left_padded": False,
+            },
+        )
 
     def _trim_generated_tokens(
         self,
@@ -1130,6 +1343,16 @@ class Server:
             token_ids = [result.token_ids[idx : idx + 1] for idx in range(batch_size)]
         else:
             token_ids = [result.token_ids for _ in range(batch_size)]
+        sequences: list[torch.Tensor | None]
+        if isinstance(result.sequences, torch.Tensor) and result.sequences.shape[0] == batch_size:
+            sequences = [result.sequences[idx : idx + 1] for idx in range(batch_size)]
+        else:
+            sequences = [result.sequences for _ in range(batch_size)]
+        prompt_lengths = cast(list[int] | None, result.metadata.get("prompt_lengths"))
+        generated_lengths = cast(list[int] | None, result.metadata.get("generated_lengths"))
+        prompt_width = cast(int | None, result.metadata.get("prompt_width"))
+        capture = cast(str | None, result.metadata.get("capture"))
+        left_padded = bool(result.metadata.get("left_padded", False))
         activations: list[dict[str, Any]] = []
         for idx in range(batch_size):
             item: dict[str, Any] = {}
@@ -1139,7 +1362,23 @@ class Server:
                     and value.ndim >= 1
                     and value.shape[0] == batch_size
                 ):
-                    item[path] = value[idx : idx + 1]
+                    row_value = value[idx : idx + 1]
+                    if (
+                        capture is not None
+                        and prompt_lengths is not None
+                        and generated_lengths is not None
+                        and prompt_width is not None
+                        and row_value.ndim >= 2
+                    ):
+                        row_value = _trim_generate_activation(
+                            row_value,
+                            prompt_length=prompt_lengths[idx],
+                            generated_length=generated_lengths[idx],
+                            prompt_width=prompt_width,
+                            capture=capture,
+                            left_padded=left_padded,
+                        )
+                    item[path] = row_value
                 else:
                     item[path] = value
             activations.append(item)
@@ -1147,12 +1386,235 @@ class Server:
             PlanResult(
                 activations=activations[idx],
                 logits=logits[idx],
-                token_ids=token_ids[idx],
+                token_ids=(
+                    _trim_generated_token_ids(
+                        token_ids[idx],
+                        generated_length=generated_lengths[idx],
+                    )
+                    if token_ids[idx] is not None and generated_lengths is not None
+                    else token_ids[idx]
+                ),
+                sequences=(
+                    _trim_generate_sequence(
+                        sequences[idx],
+                        prompt_length=prompt_lengths[idx],
+                        generated_length=generated_lengths[idx],
+                        prompt_width=prompt_width,
+                        left_padded=left_padded,
+                    )
+                    if sequences[idx] is not None
+                    and prompt_lengths is not None
+                    and generated_lengths is not None
+                    else sequences[idx]
+                ),
+                prompt_length=(prompt_lengths[idx] if prompt_lengths is not None else None),
                 completed_forward=result.completed_forward,
-                metadata=dict(result.metadata),
+                metadata={
+                    **dict(result.metadata),
+                    "prompt_lengths": None,
+                    "generated_lengths": None,
+                    "generated_length": (
+                        generated_lengths[idx] if generated_lengths is not None else None
+                    ),
+                    "prompt_width": prompt_width,
+                },
             )
             for idx in range(batch_size)
         ]
+
+    def _generate_output_from_result(
+        self,
+        result: PlanResult,
+        *,
+        left_padded: bool = False,
+    ) -> GenerateOutput:
+        prompt_lengths = cast(list[int] | None, result.metadata.get("prompt_lengths"))
+        generated_lengths = cast(list[int] | None, result.metadata.get("generated_lengths"))
+        generated_length = cast(int | None, result.metadata.get("generated_length"))
+        prompt_width = cast(int | None, result.metadata.get("prompt_width"))
+        capture = cast(str | None, result.metadata.get("capture"))
+        activations = dict(result.activations)
+        if (
+            prompt_lengths is not None
+            and generated_lengths is not None
+            and prompt_width is not None
+            and capture is not None
+            and isinstance(result.sequences, torch.Tensor)
+            and result.sequences.shape[0] == 1
+        ):
+            activations = {
+                path: _trim_generate_activation(
+                    value,
+                    prompt_length=prompt_lengths[0],
+                    generated_length=generated_lengths[0],
+                    prompt_width=prompt_width,
+                    capture=capture,
+                    left_padded=left_padded or bool(result.metadata.get("left_padded", False)),
+                )
+                if isinstance(value, torch.Tensor) and value.ndim >= 2
+                else value
+                for path, value in activations.items()
+            }
+        return generate_output_from_path_activations(
+            cast(torch.Tensor, result.sequences),
+            cast(torch.Tensor, result.token_ids),
+            activations,
+            prompt_length=(
+                prompt_lengths[0]
+                if prompt_lengths is not None and len(prompt_lengths) == 1
+                else result.prompt_length if result.prompt_length is not None else prompt_lengths
+            ),
+            generated_length=(
+                generated_lengths[0]
+                if generated_lengths is not None and len(generated_lengths) == 1
+                else generated_length if generated_length is not None else generated_lengths
+            ),
+        )
+
+
+def _merge_plan_results(results: Sequence[PlanResult]) -> PlanResult:
+    if not results:
+        return PlanResult()
+    first = results[0]
+    paths = set().union(*(result.activations for result in results))
+    activations = {
+        path: _merge_plan_value(
+            [result.activations[path] for result in results if path in result.activations]
+        )
+        for path in sorted(paths)
+    }
+    metadata = dict(first.metadata)
+    if any(result.metadata != first.metadata for result in results[1:]):
+        metadata = {}
+    return PlanResult(
+        activations=activations,
+        logits=_merge_plan_value([result.logits for result in results]),
+        token_ids=_merge_plan_value([result.token_ids for result in results]),
+        sequences=_merge_plan_value([result.sequences for result in results]),
+        session_id=first.session_id
+        if all(result.session_id == first.session_id for result in results)
+        else None,
+        prompt_length=first.prompt_length
+        if all(result.prompt_length == first.prompt_length for result in results)
+        else None,
+        completed_forward=all(result.completed_forward for result in results),
+        metadata=metadata,
+    )
+
+
+def _merge_plan_value(values: Sequence[Any]) -> Any:
+    present = [value for value in values if value is not None]
+    if not present:
+        return None
+    if all(isinstance(value, torch.Tensor) for value in present):
+        return torch.cat(cast(list[torch.Tensor], present), dim=0)
+    return present[0]
+
+
+def _stack_generated_activation_slices(
+    values: Sequence[torch.Tensor],
+    *,
+    batch_size: int,
+    device: torch.device,
+) -> torch.Tensor:
+    if values:
+        return torch.cat(list(values), dim=1)
+    return torch.empty((batch_size, 0), dtype=torch.float32, device=device)
+
+
+def _generated_lengths(generated: torch.Tensor, eos_ids: set[int]) -> list[int]:
+    """Return generated token counts, including EOS when it is emitted."""
+
+    if generated.ndim != 2:
+        raise ValueError("Expected generated tokens with shape [batch, steps].")
+    if not eos_ids:
+        return [int(generated.shape[1])] * int(generated.shape[0])
+    lengths: list[int] = []
+    for row in generated:
+        row_values = row.detach().cpu().tolist()
+        length = len(row_values)
+        for idx, token_id in enumerate(row_values):
+            if int(token_id) in eos_ids:
+                length = idx + 1
+                break
+        lengths.append(length)
+    return lengths
+
+
+def _trim_sequence_output(
+    value: torch.Tensor | None,
+    *,
+    prompt_length: int,
+    generated_length: int,
+) -> torch.Tensor | None:
+    if value is None:
+        return None
+    return value[:, : prompt_length + generated_length]
+
+
+def _trim_generated_token_ids(
+    value: torch.Tensor | None,
+    *,
+    generated_length: int,
+) -> torch.Tensor | None:
+    if value is None:
+        return None
+    return value[:, :generated_length]
+
+
+def _trim_generate_sequence(
+    value: torch.Tensor | None,
+    *,
+    prompt_length: int,
+    generated_length: int,
+    prompt_width: int | None,
+    left_padded: bool,
+) -> torch.Tensor | None:
+    if value is None:
+        return None
+    if prompt_width is None:
+        return _trim_sequence_output(
+            value,
+            prompt_length=prompt_length,
+            generated_length=generated_length,
+        )
+    prompt_slice = value[:, :prompt_width]
+    generated_slice = value[:, prompt_width : prompt_width + generated_length]
+    if left_padded:
+        prompt_slice = prompt_slice[:, prompt_width - prompt_length :]
+    else:
+        prompt_slice = prompt_slice[:, :prompt_length]
+    return torch.cat([prompt_slice, generated_slice], dim=1)
+
+
+def _trim_generate_activation(
+    value: torch.Tensor,
+    *,
+    prompt_length: int,
+    generated_length: int,
+    prompt_width: int,
+    capture: str,
+    left_padded: bool,
+) -> torch.Tensor:
+    if capture == "generated":
+        return value[:, :generated_length]
+    prompt_slice = value[:, :prompt_width]
+    generated_slice = value[:, prompt_width : prompt_width + generated_length]
+    if left_padded:
+        prompt_slice = prompt_slice[:, prompt_width - prompt_length :]
+    else:
+        prompt_slice = prompt_slice[:, :prompt_length]
+    return torch.cat([prompt_slice, generated_slice], dim=1)
+
+
+def _cache_position(cache: Any, input_ids: torch.Tensor) -> torch.Tensor | None:
+    if cache is None:
+        start = 0
+    elif callable(getattr(cache, "get_seq_length", None)):
+        start = int(cache.get_seq_length())
+    else:
+        return None
+    return torch.arange(start, start + input_ids.shape[-1], device=input_ids.device)
 
 
 def _batch_size_from_mapping(batch: Mapping[str, Any]) -> int:
@@ -1160,3 +1622,26 @@ def _batch_size_from_mapping(batch: Mapping[str, Any]) -> int:
     if isinstance(input_ids, torch.Tensor) and input_ids.ndim >= 1:
         return int(input_ids.shape[0])
     return 1
+
+
+class Server:
+    """Deployment wrapper around the shared lowered tinyinterp runtime."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        object.__setattr__(self, "_runtime", _RuntimeCore(*args, **kwargs))
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._runtime, name)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name == "_runtime":
+            object.__setattr__(self, name, value)
+            return
+        setattr(self._runtime, name, value)
+
+    def __dir__(self) -> list[str]:
+        return sorted(set(object.__dir__(self) + dir(self._runtime)))
+
+    @property
+    def runtime(self) -> _RuntimeCore:
+        return self._runtime

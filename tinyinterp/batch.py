@@ -158,6 +158,7 @@ class _BatchPlanner:
                 map_proxies=call.map_proxies,
                 grad=False,
                 requested_calls=1,
+                always_output=bool(call.get_proxies or call.map_proxies),
             )
             call.future._set_value(result)
             return
@@ -173,6 +174,7 @@ class _BatchPlanner:
             map_proxies=fused_map,
             grad=False,
             requested_calls=len(group),
+            always_output=bool(group[0].get_proxies or group[0].map_proxies),
         )
         split_results = _split_result(result, batch_sizes)
         for call, split in zip(group, split_results, strict=True):
@@ -234,7 +236,7 @@ def _can_stack_values(left: Any, right: Any) -> bool:
         return len(left) == len(right) and all(
             _can_stack_values(a, b) for a, b in zip(left, right, strict=True)
         )
-    return bool(left == right)
+    return _leaf_values_match(left, right)
 
 
 def _stack_values(values: list[Any]) -> Any:
@@ -247,6 +249,8 @@ def _stack_values(values: list[Any]) -> Any:
         return tuple(_stack_values([value[idx] for value in values]) for idx in range(len(first)))
     if isinstance(first, list):
         return [_stack_values([value[idx] for value in values]) for idx in range(len(first))]
+    if not all(_leaf_values_match(first, value) for value in values[1:]):
+        raise ValueError("Cannot fuse batched calls with mismatched non-tensor values.")
     return first
 
 
@@ -268,6 +272,11 @@ def _fuse_map_fns(group: list[_QueuedCall], batch_sizes: list[int]) -> dict[Any,
                 end = start + size
                 chunks.append(fn(x[start:end]))
                 start = end
+            if start != int(x.shape[0]):
+                raise ValueError(
+                    "Batched map function received a tensor whose batch dimension "
+                    "did not match the fused call group."
+                )
             return torch.cat(chunks, dim=0)
 
         fused[proxy] = batched_map
@@ -279,7 +288,31 @@ def _infer_batch_size(args: tuple[Any, ...], kwargs: dict[str, Any]) -> int:
         size = _batch_size_from_value(value)
         if size is not None:
             return size
-    raise TypeError("Could not infer batch dimension for batched tinyinterp call.")
+    raise TypeError(
+        "Could not infer a batch dimension for ti.batch(); "
+        "expected at least one tensor input in args or kwargs."
+    )
+
+
+def _leaf_values_match(left: Any, right: Any) -> bool:
+    try:
+        equal = left == right
+    except Exception:
+        return False
+    if isinstance(equal, bool):
+        return equal
+    if isinstance(equal, torch.Tensor):
+        return equal.ndim == 0 and bool(equal.item())
+    item = getattr(equal, "item", None)
+    if callable(item):
+        try:
+            return bool(item())
+        except Exception:
+            return False
+    try:
+        return bool(equal)
+    except Exception:
+        return False
 
 
 def _batch_size_from_value(value: Any) -> int | None:
@@ -312,6 +345,7 @@ def _split_result(result: Any, batch_sizes: list[int]) -> list[Any]:
                     model_output,
                     activations,
                     result._id_to_sid,
+                    path_to_sid=result._path_to_sid,
                     completed_forward=result.completed_forward,
                 )
             )

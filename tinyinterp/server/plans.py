@@ -196,9 +196,7 @@ def _encode_map_fn(path: str, fn: Any) -> MapSpec:
         return MapSpec(path=path, op="scale", value=fn.factor)
     if isinstance(fn, maps_mod._Replace):
         return MapSpec(path=path, op="replace", value=fn.value)
-    raise TypeError(
-        "tinyinterp Server only supports built-in map ops: zero, add, scale, replace."
-    )
+    raise TypeError("tinyinterp Server only supports built-in map ops: zero, add, scale, replace.")
 
 
 def _fingerprint_value(value: Any) -> Any:

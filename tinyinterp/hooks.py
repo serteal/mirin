@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from contextvars import ContextVar, Token
+from dataclasses import dataclass, field
 from typing import Any, cast
 
 import torch
@@ -20,33 +22,34 @@ class _EarlyStop(Exception):
     """Internal control-flow exception used for capture-only early stop."""
 
 
-class HookState:
-    """Mutable per-model state shared by all permanent hooks."""
+@dataclass(slots=True)
+class _CallState:
+    get_sids: set[int]
+    map_fns: dict[int, MapFn]
+    grad: bool
+    stop_enabled: bool
+    remaining_gets: int
+    buffers: dict[int, torch.Tensor] = field(default_factory=dict)
+    stop_seen: set[int] = field(default_factory=set)
 
-    __slots__ = (
-        "_id_map",
-        "_paths",
-        "_get_flags",
-        "_map_fns",
-        "_buffers",
-        "_handles",
-        "_stop_enabled",
-        "_stop_seen",
-        "_remaining_gets",
-        "grad",
-    )
+
+class HookState:
+    """Permanent hooks with per-call capture state stored in a context variable.
+
+    Hook capture follows the current execution context. This supports overlapping
+    calls in one process, but forwards that dispatch hooked module execution onto
+    other threads are intentionally unsupported.
+    """
+
+    __slots__ = ("_id_map", "_paths", "_handles", "_current")
 
     def __init__(self) -> None:
         self._id_map: dict[int, int] = {}
         self._paths: list[str] = []
-        self._get_flags: list[bool] = []
-        self._map_fns: list[MapFn | None] = []
-        self._buffers: list[torch.Tensor | None] = []
         self._handles: list[RemovableHandle] = []
-        self._stop_enabled = False
-        self._stop_seen: list[bool] = []
-        self._remaining_gets = 0
-        self.grad = False
+        self._current: ContextVar[_CallState | None] = ContextVar(
+            "tinyinterp_hook_state", default=None
+        )
 
     @property
     def n_modules(self) -> int:
@@ -56,14 +59,14 @@ class HookState:
     def id_map(self) -> dict[int, int]:
         return self._id_map
 
+    @property
+    def path_to_sid(self) -> dict[str, int]:
+        return {path: sid for sid, path in enumerate(self._paths)}
+
     def register(self, module: nn.Module, path: str) -> None:
         sid = len(self._paths)
         self._id_map[id(module)] = sid
         self._paths.append(path)
-        self._get_flags.append(False)
-        self._map_fns.append(None)
-        self._buffers.append(None)
-        self._stop_seen.append(False)
         self._handles.append(module.register_forward_hook(self._make_hook(path, sid)))
 
     def sid_for(self, module: nn.Module) -> int:
@@ -76,47 +79,32 @@ class HookState:
         *,
         grad: bool,
         stop_at_last_get: bool = False,
-    ) -> None:
-        self.grad = grad
-        self._stop_enabled = stop_at_last_get
-        self._remaining_gets = 0
-        for proxy in get_proxies:
-            sid = self.sid_for(proxy._module)
-            if not self._get_flags[sid]:
-                self._remaining_gets += 1
-            self._get_flags[sid] = True
-        for proxy, fn in map_dict.items():
-            self._map_fns[self.sid_for(proxy._module)] = fn
-        if self._remaining_gets == 0:
-            self._stop_enabled = False
+    ) -> Token[_CallState | None]:
+        get_sids = {self.sid_for(proxy._module) for proxy in get_proxies}
+        state = _CallState(
+            get_sids=get_sids,
+            map_fns={self.sid_for(proxy._module): fn for proxy, fn in map_dict.items()},
+            grad=grad,
+            stop_enabled=stop_at_last_get and bool(get_sids),
+            remaining_gets=len(get_sids),
+        )
+        return self._current.set(state)
 
-    def collect_and_deactivate(self, *, strict: bool) -> dict[int, torch.Tensor]:
-        captured: dict[int, torch.Tensor] = {}
-        missing: list[str] = []
-        for sid, get_flag in enumerate(self._get_flags):
-            if not get_flag:
-                continue
-            buffer = self._buffers[sid]
-            if buffer is None:
-                if strict:
-                    missing.append(self._paths[sid])
-                continue
-            captured[sid] = buffer
-        self.reset()
-        if missing:
+    def collect_and_deactivate(
+        self,
+        token: Token[_CallState | None],
+        *,
+        strict: bool,
+    ) -> dict[int, torch.Tensor]:
+        state = self._current.get()
+        self._current.reset(token)
+        if state is None:
+            return {}
+        missing = [self._paths[sid] for sid in sorted(state.get_sids.difference(state.buffers))]
+        if missing and strict:
             joined = ", ".join(missing)
             raise RuntimeError(f"Requested modules did not capture activations: {joined}")
-        return captured
-
-    def reset(self) -> None:
-        for sid in range(len(self._paths)):
-            self._get_flags[sid] = False
-            self._map_fns[sid] = None
-            self._buffers[sid] = None
-            self._stop_seen[sid] = False
-        self._stop_enabled = False
-        self._remaining_gets = 0
-        self.grad = False
+        return dict(state.buffers)
 
     def _make_hook(
         self,
@@ -124,10 +112,15 @@ class HookState:
         sid: int,
     ) -> Callable[[nn.Module, tuple[object, ...], object], object]:
         def hook(_module: nn.Module, _inputs: tuple[object, ...], output: object) -> object:
-            get_flag = self._get_flags[sid]
-            map_fn = self._map_fns[sid]
+            state = self._current.get()
             debug = get_debug()
+            if state is None:
+                if debug >= 4:
+                    log_hook_event(path, sid=sid, get=False, map_fn=None)
+                return output
 
+            get_flag = sid in state.get_sids
+            map_fn = state.map_fns.get(sid)
             if not get_flag and map_fn is None:
                 if debug >= 4:
                     log_hook_event(path, sid=sid, get=False, map_fn=None)
@@ -135,27 +128,32 @@ class HookState:
 
             activation = _extract(output)
             if get_flag:
-                if self.grad and activation.requires_grad:
+                if state.grad and activation.requires_grad:
                     activation.retain_grad()
-                    self._buffers[sid] = activation
+                    state.buffers[sid] = activation
                 elif map_fn is not None:
-                    self._buffers[sid] = activation.detach().clone()
+                    state.buffers[sid] = activation.detach().clone()
                 else:
-                    self._buffers[sid] = activation.detach()
+                    state.buffers[sid] = activation.detach()
 
             if debug >= 4:
                 log_hook_event(path, sid=sid, get=get_flag, map_fn=map_fn, activation=activation)
 
-            if self._stop_enabled and get_flag and not self._stop_seen[sid]:
-                self._stop_seen[sid] = True
-                self._remaining_gets -= 1
-                if self._remaining_gets == 0:
+            if state.stop_enabled and get_flag and sid not in state.stop_seen:
+                # stop_at_last_get counts unique requested sites, not repeated hits of the
+                # same site within one forward pass.
+                state.stop_seen.add(sid)
+                state.remaining_gets -= 1
+                if state.remaining_gets == 0:
                     raise _EarlyStop
 
             if map_fn is None:
                 return output
 
-            mapped = map_fn(activation)
+            map_input = (
+                activation.clone() if state.grad and activation.requires_grad else activation
+            )
+            mapped = map_fn(map_input)
             if not isinstance(mapped, torch.Tensor):
                 raise TypeError(f"Map function must return a tensor, got {type(mapped).__name__}.")
             Counters.maps_applied += 1
@@ -204,7 +202,7 @@ def _replace(output: object, new: torch.Tensor) -> object:
     if isinstance(logits, torch.Tensor):
         cast(Any, output).logits = new
         return output
-    return new
+    raise TypeError(f"Cannot replace tensor inside {type(output).__name__}.")
 
 
 def _format_path(path: str) -> str:

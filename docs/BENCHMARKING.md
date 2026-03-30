@@ -29,9 +29,9 @@
 5. Avoid cherry-picking.
    Use fixed seeds, fixed prompts or batches, fixed warmup counts, and fixed repetition counts. Report median and spread, not just the best run.
 
-## Phase 3 Benchmark Matrix
+## Model API Benchmark Matrix
 
-When we move to a GPU machine, Phase 3 should benchmark these cases:
+When we move to a GPU machine, Model API should benchmark these cases:
 
 1. Inactive hook overhead.
    Compare raw model vs `ti.Model(model)` with no `get=` / `map=`.

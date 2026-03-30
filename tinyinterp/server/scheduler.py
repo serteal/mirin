@@ -113,8 +113,7 @@ def chunk_sessions_by_decode_budget(
     if len(sessions) <= max_sessions:
         return [sessions]
     return [
-        sessions[start : start + max_sessions]
-        for start in range(0, len(sessions), max_sessions)
+        sessions[start : start + max_sessions] for start in range(0, len(sessions), max_sessions)
     ]
 
 
@@ -155,8 +154,7 @@ def estimate_admission(
         admitted = False
         reason = "kv_cache_budget"
     elif (
-        max_activation_capture_bytes is not None
-        and activation_bytes > max_activation_capture_bytes
+        max_activation_capture_bytes is not None and activation_bytes > max_activation_capture_bytes
     ):
         admitted = False
         reason = "activation_budget"
@@ -186,9 +184,7 @@ def estimate_kv_cache_bytes(
     config = _text_config(getattr(wrapped, "config", None))
     if config is None:
         return 0
-    layers = int(
-        getattr(config, "num_hidden_layers", getattr(config, "n_layer", 0))
-    )
+    layers = int(getattr(config, "num_hidden_layers", getattr(config, "n_layer", 0)))
     kv_heads = int(
         getattr(
             config,
@@ -232,4 +228,6 @@ def _text_config(config: Any) -> Any | None:
     if callable(get_text):
         return get_text(decoder=True)
     return config
+
+
 T = TypeVar("T")

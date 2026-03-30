@@ -530,7 +530,7 @@ def __call__(self, *args, get=None, map=None, grad=False, **kwargs):
 
     Counters.calls += 1  # always on, ~0 cost
 
-    return Output(model_output, activations) if get or map else model_output
+    return Output(model_output, activations)
 ```
 
 When `DEBUG=0` (the default), the cost is:
@@ -703,12 +703,12 @@ At `DEBUG=0`, the total overhead is unmeasurable. At `DEBUG=4`, it's noticeable 
 
 Debug tools should be built IN PARALLEL with the features they observe, not after. Specifically:
 
-| Phase   | Debug tooling added                                                     |
-| ------- | ----------------------------------------------------------------------- |
-| Phase 0 | `DEBUG=1,2` (call logging + timing) + `ti.Counters` + `ti.context()` |
-| Phase 1 | `DEBUG=4` (hook trace) + `GRAPH=1` (intervention SVG)             |
-| Phase 2 | `DEBUG=5` (architecture discovery trace)                             |
-| Phase 3 | `DEBUG=3` (batch planner trace) + numerical diff CI                  |
-| Phase 4 | Server-mode stats (connected clients, queued requests, GPU utilization) |
+| Milestone      | Debug tooling added                                                     |
+| -------------- | ----------------------------------------------------------------------- |
+| Phase 0        | `DEBUG=1,2` (call logging + timing) + `ti.Counters` + `ti.context()` |
+| Phase 1        | `DEBUG=4` (hook trace) + `GRAPH=1` (intervention SVG)             |
+| Phase 2        | `DEBUG=5` (architecture discovery trace)                             |
+| Batching       | `DEBUG=3` (batch planner trace) + numerical diff CI                  |
+| Server runtime | Server-mode stats (connected clients, queued requests, GPU utilization) |
 
-Each phase adds the debug tools for the features in that phase. By the time we ship v1.0, all debug levels are complete and tested.
+Each milestone adds the debug tools for the features it introduces. By the time we ship v1.0, all debug levels are complete and tested.

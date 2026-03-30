@@ -2,13 +2,35 @@
 
 `tinyinterp` follows the plan's tinygrad-style rule: if we claim a speedup, we benchmark it.
 
-This harness benchmarks the current Phase 3 matrix against the current implementation:
+This harness benchmarks real user-visible workloads on real Hugging Face checkpoints.
 
-- raw wrapped model
-- `ti.Model(...)` with no `get=` / `map=`
-- one and several `get=` sites
-- one and several `map=` sites
-- eager sweep vs `ti.batch()`
+The canonical entrypoint is the unified matrix runner. It benchmarks:
+
+- local interpretability comparisons:
+  - raw Hugging Face
+  - `tinyinterp` local
+  - TransformerLens when supported and installed
+  - `nnterp` when installed
+- local vs remote API comparisons:
+  - raw Hugging Face baselines
+  - `tinyinterp` local
+  - `tinyinterp` remote `ti.Model("unix://...")`
+
+The model registry is intentionally small and representative:
+
+- `Qwen/Qwen3-1.7B`
+- `Qwen/Qwen3.5-4B`
+- `google/gemma-2-2b-it`
+- `google/gemma-3-4b-it`
+- `meta-llama/Llama-3.1-8B-Instruct`
+
+If a library is not installed, a checkpoint is gated, or a family is not supported by that
+library in this matrix, the run records a skip and continues. That is deliberate: the output
+should show the real support matrix, not pretend all libraries cover all models.
+
+The repo keeps correctness tests under `tests/` and benchmark execution under `benchmarks/`.
+That split matches the tinygrad-style rule: correctness stays deterministic, while performance
+evidence stays in explicit benchmark commands on real workloads.
 
 The harness does three things on every run:
 
@@ -24,95 +46,91 @@ Install the benchmark dependencies first:
 uv sync --extra transformers --group bench
 ```
 
-By default the CLI benchmarks these checkpoints:
-
-- `meta-llama/Llama-3.1-8B-Instruct`
-- `google/gemma-3-4b-it`
-- `Qwen/Qwen3.5-4B`
-
-If a checkpoint is gated and the current HuggingFace token cannot access it, the suite records the load
-failure and continues with the remaining models.
+Run the full real-model matrix:
 
 ```bash
-uv run python -m benchmarks.run_phase3
+uv run python -m benchmarks.run_matrix --device cuda --dtype bfloat16
 ```
 
 Save structured results:
 
 ```bash
-uv run python -m benchmarks.run_phase3 --json-output benchmarks/results/phase3.json
+uv run python -m benchmarks.run_matrix \
+  --device cuda \
+  --dtype bfloat16 \
+  --json-output benchmarks/results/matrix.json
 ```
 
-Run only one real model:
+Run one model only:
 
 ```bash
-uv run python -m benchmarks.run_phase3 \
+uv run python -m benchmarks.run_matrix \
+  --device cuda \
+  --dtype bfloat16 \
+  --model-name google/gemma-2-2b-it
+```
+
+## Slice Commands
+
+The matrix runner is the main entrypoint. The commands below are for deeper slice debugging.
+
+### Model API
+
+Benchmarks the local `ti.Model(...)` API against raw wrapped forwards:
+
+- raw wrapped model
+- `ti.Model(...)` with no `get=` / `map=`
+- one and several `get=` sites
+- one and several `map=` sites
+- eager sweep vs `ti.batch()`
+
+```bash
+uv run python -m benchmarks.run_model_api \
   --model-name meta-llama/Llama-3.1-8B-Instruct
 ```
 
-Smaller synthetic smoke run:
+### Cross-Library Local Compare
 
-```bash
-uv run python -m benchmarks.run_phase3 \
-  --synthetic \
-  --device cpu \
-  --dtype float32 \
-  --layers 2 \
-  --width 64 \
-  --n-heads 4 \
-  --seq-len 32 \
-  --batch-size 2 \
-  --micro-warmup 0 \
-  --micro-trials 2 \
-  --throughput-warmup 0 \
-  --throughput-runs 1 \
-  --sweep-width 2
-```
-
-## Compare Libraries
-
-The separate comparison harness measures the same semantic GPT-2 site across:
-
-- raw HuggingFace GPT-2
-- `tinyinterp`
-- TransformerLens
-- `nnterp`
-
-It benchmarks:
-
-- plain forward
-- one activation capture
-- one activation zeroing intervention
-
-The correctness baseline is a manual HuggingFace forward hook on GPT-2 block 0 output, so the
-comparison is about equivalent user-visible work rather than different hook sites.
-
-```bash
-uv run python -m benchmarks.run_compare_libraries
-```
-
-Save structured results:
+Measures the same semantic site across raw Hugging Face, `tinyinterp`, TransformerLens, and
+`nnterp`, with support-aware skips.
 
 ```bash
 uv run python -m benchmarks.run_compare_libraries \
+  --model meta-llama/Llama-3.1-8B-Instruct \
   --json-output benchmarks/results/compare-libraries-llama31-8b.json
 ```
 
-## Compare Larger Dataset Workloads
+### Local vs Remote API Compare
 
-For a much larger dataset-style one-site capture workload, benchmark:
+Measures the same user-visible collect/generate workload across local `tinyinterp` and remote
+`tinyinterp`. Both paths now go through the same lowered runtime; the only intended difference is
+that the remote path adds transport and serving overhead on top of the shared execution core.
+This slice reports whether deployment costs stay close to the local baseline on the covered cases.
+
+```bash
+uv run python -m benchmarks.run_remote_compare \
+  --model-name meta-llama/Llama-3.1-8B-Instruct \
+  --model-family llama3.1
+```
+
+### Runtime Internals
+
+For lower-level runtime diagnostics, there is also a separate runtime-internals slice. This is not
+part of the public product surface. It exists to justify or reject runtime complexity and to
+measure the lowered execution core directly, separate from the local-vs-remote API contract.
+
+```bash
+uv run python -m benchmarks.run_runtime_internals \
+  --model-name meta-llama/Llama-3.1-8B-Instruct
+```
+
+### Compare Larger Dataset Workloads
+
+For a larger dataset-style one-site capture workload:
 
 - `tinyinterp` manual loop
 - TransformerLens capture loop
 - `nnterp` capture loop
-
-Default workload:
-
-- model: `meta-llama/Llama-3.1-8B-Instruct`
-- source batches: `16`
-- chunk batch size: `8`
-- sequence length: `512`
-- dataset batches: `16`
 
 ```bash
 uv run python -m benchmarks.run_compare_streaming_libraries
@@ -125,48 +143,8 @@ uv run python -m benchmarks.run_compare_streaming_libraries \
   --json-output benchmarks/results/compare-streaming-libraries-llama31-8b.json
 ```
 
-## Phase 4 Server Benchmarks
-
-The server harness benchmarks:
-
-- plain HuggingFace manual-hook collection loop
-- local tinyinterp capture loop
-- `ti.Server` collector mode
-- plain HuggingFace `generate()` for one and many prompts
-- `ti.Server` single-request generation
-- `ti.Server` multi-session decode
-
-The default real-model matrix is:
-
-- `meta-llama/Llama-3.1-8B-Instruct`
-- `google/gemma-3-4b-it`
-- `Qwen/Qwen3.5-4B`
-
-Run the full suite:
+## CUDA E2E Test
 
 ```bash
-uv run python -m benchmarks.run_phase4_server
-```
-
-Save structured results:
-
-```bash
-uv run python -m benchmarks.run_phase4_server \
-  --json-output benchmarks/results/phase4-server.json
-```
-
-Run the synthetic smoke workload:
-
-```bash
-uv run python -m benchmarks.run_phase4_server \
-  --synthetic \
-  --device cpu \
-  --dtype float32 \
-  --seq-len 32 \
-  --dataset-batch-size 2 \
-  --dataset-batches 2 \
-  --generate-batch-size 2 \
-  --max-new-tokens 2 \
-  --warmup 0 \
-  --trials 1
+uv run python -m pytest -q tests/test_cuda.py --run-cuda
 ```

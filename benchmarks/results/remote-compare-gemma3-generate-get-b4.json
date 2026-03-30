@@ -1,0 +1,452 @@
+{
+  "config": {
+    "model_name": "google/gemma-3-4b-it",
+    "model_family": "gemma3",
+    "device": "cuda",
+    "dtype": "bfloat16",
+    "seed": 7,
+    "batch_size": 4,
+    "seq_len": 64,
+    "max_new_tokens": 4,
+    "warmup": 1,
+    "trials": 3,
+    "json_output": "benchmarks/results/remote-compare-gemma3-generate-get-b4.json"
+  },
+  "environment": {
+    "model_name": "google/gemma-3-4b-it",
+    "architecture": "Gemma3ForConditionalGeneration",
+    "attention_impl": "sdpa",
+    "device": "cuda",
+    "dtype": "bfloat16",
+    "gpu_name": "NVIDIA A100-SXM4-80GB",
+    "torch_version": "2.4.1+cu124",
+    "cuda_version": "12.4",
+    "cudnn_version": 91900,
+    "python_version": "3.11.10",
+    "platform": "Linux-6.8.0-52-generic-x86_64-with-glibc2.35",
+    "git_commit": "0aed55be26f48187a8e5292e0ea42f6f3882966b",
+    "git_dirty": true,
+    "n_layers": 34,
+    "n_heads": 8,
+    "width": 2560,
+    "vocab_size": 262208,
+    "seq_len": 64,
+    "batch_size": 4,
+    "site_path": "model.language_model.layers.0.self_attn"
+  },
+  "support": {
+    "hf_generate": {
+      "name": "hf_generate",
+      "package": "transformers",
+      "module": "transformers",
+      "version": "4.57.6",
+      "installed": true,
+      "supported": true,
+      "runnable": true,
+      "reason": "",
+      "note": ""
+    },
+    "tinyinterp_local": {
+      "name": "tinyinterp_local",
+      "package": "",
+      "module": "",
+      "version": "built-in",
+      "installed": true,
+      "supported": true,
+      "runnable": true,
+      "reason": "",
+      "note": ""
+    },
+    "tinyinterp_remote": {
+      "name": "tinyinterp_remote",
+      "package": "",
+      "module": "",
+      "version": "built-in",
+      "installed": true,
+      "supported": true,
+      "runnable": true,
+      "reason": "",
+      "note": ""
+    }
+  },
+  "correctness": {
+    "collect_local_vs_hf": {
+      "ok": true,
+      "max_abs_diff": 0.0
+    },
+    "collect_remote_vs_hf": {
+      "ok": true,
+      "max_abs_diff": 0.0
+    },
+    "generate_local_vs_hf": {
+      "ok": true
+    },
+    "generate_remote_vs_hf": {
+      "ok": true
+    },
+    "generate_get_all_sequences_remote_vs_local": {
+      "ok": true
+    },
+    "generate_get_all_activations_remote_vs_local": {
+      "ok": true,
+      "max_abs_diff": 0.0
+    },
+    "generate_get_generated_sequences_remote_vs_local": {
+      "ok": true
+    },
+    "generate_get_generated_activations_remote_vs_local": {
+      "ok": true,
+      "max_abs_diff": 0.0
+    }
+  },
+  "performance": {
+    "collect_remote_vs_local": {
+      "ok": true,
+      "baseline_ms": 791.7639091610909,
+      "candidate_ms": 706.0728445649147,
+      "delta_pct": -10.822805081753428
+    },
+    "generate_remote_vs_local": {
+      "ok": true,
+      "baseline_ms": 206.57195150852203,
+      "candidate_ms": 203.031487762928,
+      "delta_pct": -1.7139131037584132
+    },
+    "generate_get_all_remote_vs_local": {
+      "ok": true,
+      "baseline_ms": 257.51183182001114,
+      "candidate_ms": 255.60592859983444,
+      "delta_pct": -0.7401225826038305
+    },
+    "generate_get_generated_remote_vs_local": {
+      "ok": true,
+      "baseline_ms": 254.87226247787476,
+      "candidate_ms": 253.5155564546585,
+      "delta_pct": -0.5323082276691538
+    }
+  },
+  "cases": [
+    {
+      "name": "hf_collect_manual",
+      "times_ms": [
+        50.568938,
+        51.385291,
+        51.405221
+      ],
+      "median_ms": 51.385290920734406,
+      "p90_ms": 51.40123516321182,
+      "std_ms": 0.3896149231064862,
+      "min_ms": 50.56893825531006,
+      "max_ms": 51.40522122383118,
+      "gpu_peak_memory_mb": 8350.6689453125,
+      "rss_after_mb": 1294.7890625,
+      "counters": null,
+      "counters_summary": null,
+      "user_calls": null,
+      "forward_passes": null,
+      "examples_per_second": 77.84328799792716,
+      "tokens_per_second": 4981.970431867338
+    },
+    {
+      "name": "hf_generate_batched",
+      "times_ms": [
+        212.643534,
+        214.317739,
+        214.198783
+      ],
+      "median_ms": 214.1987830400467,
+      "p90_ms": 214.29394781589508,
+      "std_ms": 0.76273723952693,
+      "min_ms": 212.64353394508362,
+      "max_ms": 214.31773900985718,
+      "gpu_peak_memory_mb": 8277.82080078125,
+      "rss_after_mb": 1294.7890625,
+      "counters": null,
+      "counters_summary": null,
+      "user_calls": null,
+      "forward_passes": null,
+      "examples_per_second": 18.67424241739113,
+      "tokens_per_second": 74.69696966956452
+    },
+    {
+      "name": "tinyinterp_collect_local",
+      "times_ms": [
+        707.656108,
+        791.763909,
+        805.787988
+      ],
+      "median_ms": 791.7639091610909,
+      "p90_ms": 802.9831722378731,
+      "std_ms": 43.33418324115902,
+      "min_ms": 707.6561078429222,
+      "max_ms": 805.7879880070686,
+      "gpu_peak_memory_mb": 16448.39794921875,
+      "rss_after_mb": 1298.3671875,
+      "counters": {
+        "calls": 3,
+        "forward_passes": 3,
+        "total_time_ns": 7223103,
+        "forward_time_ns": 7174039,
+        "hook_overhead_ns": 49064,
+        "activations_captured": 3,
+        "activations_bytes": 3932160,
+        "buffer_pool_hits": 0,
+        "buffer_pool_misses": 0,
+        "maps_applied": 0,
+        "batch_groups": 0,
+        "batch_fusions": 0,
+        "prefix_layers_saved": 0
+      },
+      "counters_summary": "tinyinterp counters:\n  calls:                 3\n  forward_passes:        3\n  total_time:            7.223ms\n  forward_time:          7.174ms\n  hook_overhead:         0.049ms\n  activations_captured:  3\n  activations_bytes:     3932160\n  early_stops:           3\n  batch_groups:          0\n  batch_fusions:         0",
+      "user_calls": 3,
+      "forward_passes": 3,
+      "examples_per_second": 5.052011027173717,
+      "tokens_per_second": 323.3287057391179
+    },
+    {
+      "name": "tinyinterp_generate_local",
+      "times_ms": [
+        208.709143,
+        206.571952,
+        202.022769
+      ],
+      "median_ms": 206.57195150852203,
+      "p90_ms": 208.28170478343964,
+      "std_ms": 2.7882742171666712,
+      "min_ms": 202.0227685570717,
+      "max_ms": 208.70914310216904,
+      "gpu_peak_memory_mb": 16493.77099609375,
+      "rss_after_mb": 1298.3671875,
+      "counters": {
+        "calls": 0,
+        "forward_passes": 0,
+        "total_time_ns": 0,
+        "forward_time_ns": 0,
+        "hook_overhead_ns": 0,
+        "activations_captured": 0,
+        "activations_bytes": 0,
+        "buffer_pool_hits": 0,
+        "buffer_pool_misses": 0,
+        "maps_applied": 0,
+        "batch_groups": 0,
+        "batch_fusions": 0,
+        "prefix_layers_saved": 0
+      },
+      "counters_summary": "tinyinterp counters:\n  calls:                 0\n  forward_passes:        0\n  total_time:            0.000ms\n  forward_time:          0.000ms\n  hook_overhead:         0.000ms\n  activations_captured:  0\n  activations_bytes:     0\n  early_stops:           0\n  batch_groups:          0\n  batch_fusions:         0",
+      "user_calls": 0,
+      "forward_passes": 0,
+      "examples_per_second": 19.36371308296897,
+      "tokens_per_second": 77.45485233187588
+    },
+    {
+      "name": "tinyinterp_generate_get_all_local",
+      "times_ms": [
+        259.135149,
+        257.511832,
+        254.824042
+      ],
+      "median_ms": 257.51183182001114,
+      "p90_ms": 258.8104858994484,
+      "std_ms": 1.777795665134447,
+      "min_ms": 254.82404232025146,
+      "max_ms": 259.1351494193077,
+      "gpu_peak_memory_mb": 16603.685546875,
+      "rss_after_mb": 1298.3671875,
+      "counters": {
+        "calls": 15,
+        "forward_passes": 15,
+        "total_time_ns": 737196099,
+        "forward_time_ns": 736951856,
+        "hook_overhead_ns": 244243,
+        "activations_captured": 15,
+        "activations_bytes": 4177920,
+        "buffer_pool_hits": 0,
+        "buffer_pool_misses": 0,
+        "maps_applied": 0,
+        "batch_groups": 0,
+        "batch_fusions": 0,
+        "prefix_layers_saved": 0
+      },
+      "counters_summary": "tinyinterp counters:\n  calls:                 15\n  forward_passes:        15\n  total_time:            737.196ms\n  forward_time:          736.952ms\n  hook_overhead:         0.244ms\n  activations_captured:  15\n  activations_bytes:     4177920\n  early_stops:           0\n  batch_groups:          0\n  batch_fusions:         0",
+      "user_calls": 15,
+      "forward_passes": 15,
+      "examples_per_second": 15.533266847310593,
+      "tokens_per_second": 62.13306738924237
+    },
+    {
+      "name": "tinyinterp_generate_get_generated_local",
+      "times_ms": [
+        255.003698,
+        254.872262,
+        253.519803
+      ],
+      "median_ms": 254.87226247787476,
+      "p90_ms": 254.97741103172302,
+      "std_ms": 0.6706849928316604,
+      "min_ms": 253.51980328559875,
+      "max_ms": 255.0036981701851,
+      "gpu_peak_memory_mb": 16603.685546875,
+      "rss_after_mb": 1298.3671875,
+      "counters": {
+        "calls": 15,
+        "forward_passes": 15,
+        "total_time_ns": 731957894,
+        "forward_time_ns": 731751093,
+        "hook_overhead_ns": 206801,
+        "activations_captured": 15,
+        "activations_bytes": 4177920,
+        "buffer_pool_hits": 0,
+        "buffer_pool_misses": 0,
+        "maps_applied": 0,
+        "batch_groups": 0,
+        "batch_fusions": 0,
+        "prefix_layers_saved": 0
+      },
+      "counters_summary": "tinyinterp counters:\n  calls:                 15\n  forward_passes:        15\n  total_time:            731.958ms\n  forward_time:          731.751ms\n  hook_overhead:         0.207ms\n  activations_captured:  15\n  activations_bytes:     4177920\n  early_stops:           0\n  batch_groups:          0\n  batch_fusions:         0",
+      "user_calls": 15,
+      "forward_passes": 15,
+      "examples_per_second": 15.694136196351444,
+      "tokens_per_second": 62.776544785405775
+    },
+    {
+      "name": "tinyinterp_collect_remote",
+      "times_ms": [
+        703.594364,
+        706.072845,
+        783.743471
+      ],
+      "median_ms": 706.0728445649147,
+      "p90_ms": 768.209345638752,
+      "std_ms": 37.21222672875982,
+      "min_ms": 703.5943642258644,
+      "max_ms": 783.7434709072113,
+      "gpu_peak_memory_mb": 8287.23828125,
+      "rss_after_mb": 1300.9375,
+      "counters": {
+        "calls": 3,
+        "forward_passes": 3,
+        "total_time_ns": 11852620,
+        "forward_time_ns": 11798379,
+        "hook_overhead_ns": 54241,
+        "activations_captured": 3,
+        "activations_bytes": 3932160,
+        "buffer_pool_hits": 0,
+        "buffer_pool_misses": 0,
+        "maps_applied": 0,
+        "batch_groups": 0,
+        "batch_fusions": 0,
+        "prefix_layers_saved": 0
+      },
+      "counters_summary": "tinyinterp counters:\n  calls:                 3\n  forward_passes:        3\n  total_time:            11.853ms\n  forward_time:          11.798ms\n  hook_overhead:         0.054ms\n  activations_captured:  3\n  activations_bytes:     3932160\n  early_stops:           3\n  batch_groups:          0\n  batch_fusions:         0",
+      "user_calls": 3,
+      "forward_passes": 3,
+      "examples_per_second": 5.665137854812726,
+      "tokens_per_second": 362.56882270801447
+    },
+    {
+      "name": "tinyinterp_generate_remote",
+      "times_ms": [
+        202.755727,
+        203.031488,
+        214.997657
+      ],
+      "median_ms": 203.031487762928,
+      "p90_ms": 212.60442286729813,
+      "std_ms": 5.70701406872325,
+      "min_ms": 202.75572687387466,
+      "max_ms": 214.99765664339066,
+      "gpu_peak_memory_mb": 8332.298828125,
+      "rss_after_mb": 1300.9375,
+      "counters": {
+        "calls": 0,
+        "forward_passes": 0,
+        "total_time_ns": 0,
+        "forward_time_ns": 0,
+        "hook_overhead_ns": 0,
+        "activations_captured": 0,
+        "activations_bytes": 0,
+        "buffer_pool_hits": 0,
+        "buffer_pool_misses": 0,
+        "maps_applied": 0,
+        "batch_groups": 0,
+        "batch_fusions": 0,
+        "prefix_layers_saved": 0
+      },
+      "counters_summary": "tinyinterp counters:\n  calls:                 0\n  forward_passes:        0\n  total_time:            0.000ms\n  forward_time:          0.000ms\n  hook_overhead:         0.000ms\n  activations_captured:  0\n  activations_bytes:     0\n  early_stops:           0\n  batch_groups:          0\n  batch_fusions:         0",
+      "user_calls": 0,
+      "forward_passes": 0,
+      "examples_per_second": 19.701377574845164,
+      "tokens_per_second": 78.80551029938066
+    },
+    {
+      "name": "tinyinterp_generate_get_all_remote",
+      "times_ms": [
+        265.613735,
+        252.949044,
+        255.605929
+      ],
+      "median_ms": 255.60592859983444,
+      "p90_ms": 263.61217349767685,
+      "std_ms": 5.452925890691891,
+      "min_ms": 252.9490441083908,
+      "max_ms": 265.61373472213745,
+      "gpu_peak_memory_mb": 8444.32080078125,
+      "rss_after_mb": 1300.9375,
+      "counters": {
+        "calls": 15,
+        "forward_passes": 15,
+        "total_time_ns": 734937093,
+        "forward_time_ns": 734694123,
+        "hook_overhead_ns": 242970,
+        "activations_captured": 15,
+        "activations_bytes": 4177920,
+        "buffer_pool_hits": 0,
+        "buffer_pool_misses": 0,
+        "maps_applied": 0,
+        "batch_groups": 0,
+        "batch_fusions": 0,
+        "prefix_layers_saved": 0
+      },
+      "counters_summary": "tinyinterp counters:\n  calls:                 15\n  forward_passes:        15\n  total_time:            734.937ms\n  forward_time:          734.694ms\n  hook_overhead:         0.243ms\n  activations_captured:  15\n  activations_bytes:     4177920\n  early_stops:           0\n  batch_groups:          0\n  batch_fusions:         0",
+      "user_calls": 15,
+      "forward_passes": 15,
+      "examples_per_second": 15.649089291126055,
+      "tokens_per_second": 62.59635716450422
+    },
+    {
+      "name": "tinyinterp_generate_get_generated_remote",
+      "times_ms": [
+        253.515556,
+        253.743477,
+        250.328474
+      ],
+      "median_ms": 253.5155564546585,
+      "p90_ms": 253.6978930234909,
+      "std_ms": 1.5589060405244675,
+      "min_ms": 250.32847374677658,
+      "max_ms": 253.743477165699,
+      "gpu_peak_memory_mb": 8443.07080078125,
+      "rss_after_mb": 1300.9375,
+      "counters": {
+        "calls": 15,
+        "forward_passes": 15,
+        "total_time_ns": 721009731,
+        "forward_time_ns": 720840479,
+        "hook_overhead_ns": 169252,
+        "activations_captured": 15,
+        "activations_bytes": 4177920,
+        "buffer_pool_hits": 0,
+        "buffer_pool_misses": 0,
+        "maps_applied": 0,
+        "batch_groups": 0,
+        "batch_fusions": 0,
+        "prefix_layers_saved": 0
+      },
+      "counters_summary": "tinyinterp counters:\n  calls:                 15\n  forward_passes:        15\n  total_time:            721.010ms\n  forward_time:          720.840ms\n  hook_overhead:         0.169ms\n  activations_captured:  15\n  activations_bytes:     4177920\n  early_stops:           0\n  batch_groups:          0\n  batch_fusions:         0",
+      "user_calls": 15,
+      "forward_passes": 15,
+      "examples_per_second": 15.778124450975866,
+      "tokens_per_second": 63.112497803903466
+    }
+  ]
+}

@@ -229,14 +229,14 @@ Assessment:
 
 Source artifacts:
 
-- `benchmarks/results/phase4-server-after-steps.json`
-- `benchmarks/results/phase4-server-smoke-after-steps3.json`
+- `benchmarks/results/server_runtime-after-steps.json`
+- `benchmarks/results/server_runtime-smoke-after-step3.json`
 
 The exact numbers vary by model and benchmark revision, but the pattern is consistent.
 
 ### 3.1 Collector path
 
-In `phase4-server-after-steps.json`, `server_collector` is faster than `hf_hook_loop` by:
+In `server_runtime-after-steps.json`, `server_collector` is faster than `hf_hook_loop` by:
 
 - about 3.7x on Llama 3.1 8B
 - about 1.7x on Gemma 3 4B
@@ -261,7 +261,7 @@ The current `server_generate_multi_session` beats sequential HuggingFace generat
 
 But it still trails HuggingFace's already-batched multi-example generate path by a lot:
 
-- about 1.7x slower on Llama in `phase4-server-after-steps.json`
+- about 1.7x slower on Llama in `server_runtime-after-steps.json`
 - about 2.1x slower on Gemma
 - about 3.8x slower on Qwen
 
@@ -271,7 +271,7 @@ This is the clearest sign that the remaining bottleneck is scheduler/cache imple
 
 Static-cache multi-session decode is currently much worse than dynamic-cache multi-session decode where supported:
 
-- about 2.9x slower on Llama in `phase4-server-after-steps.json`
+- about 2.9x slower on Llama in `server_runtime-after-steps.json`
 - about 1.6x slower on Gemma
 
 That lines up with the code: static cache exists, but static-cache groups do not actually microbatch.

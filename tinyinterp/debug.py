@@ -99,6 +99,10 @@ def render_intervention_graph(
     """Render a small SVG showing the modules captured or mapped in one call."""
 
     path = Path(output_path)
+    if path.exists() and path.is_dir():
+        raise ValueError("graph output_path must be a file, not a directory.")
+    if path.suffix.lower() != ".svg":
+        raise ValueError("graph output_path must end with .svg.")
     path.parent.mkdir(parents=True, exist_ok=True)
 
     row_labels = sorted(
@@ -160,10 +164,7 @@ def log_batch_plan(
 
     joined_get = ", ".join(get_paths)
     joined_map = ", ".join(map_paths)
-    print(
-        f"[ti] batch: size={size} model={model_name} "
-        f"get=[{joined_get}] map=[{joined_map}]"
-    )
+    print(f"[ti] batch: size={size} model={model_name} get=[{joined_get}] map=[{joined_map}]")
 
 
 def _input_shape(args: Sequence[Any], kwargs: Mapping[str, Any]) -> str:
@@ -186,6 +187,8 @@ def _tensor_bytes(tensor: torch.Tensor) -> int:
 
 
 def _format_bytes(n_bytes: int) -> str:
+    if n_bytes < 0:
+        raise ValueError("Byte counts must be non-negative.")
     if n_bytes >= 1024 * 1024:
         return f"{n_bytes / (1024 * 1024):.1f} MB"
     if n_bytes >= 1024:

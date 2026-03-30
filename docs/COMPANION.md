@@ -234,7 +234,7 @@ class Output:
         return self._model_output[site]
 ```
 
-**Critically:** if `get=None` and `map=None`, we return the raw model output directly (not wrapped in Output). This means the wrapper is completely invisible when not used. The model behaves exactly like the unwrapped version.
+`model(...)` now always returns `Output`. When you do not request `get=` or `map=`, the wrapper is thin: `output.logits` and `output[0]` still delegate to the underlying model result, while local and remote backends keep the same result contract.
 
 ---
 
@@ -525,24 +525,21 @@ When the user does `ti.Model(my_already_loaded_model)`, we DON'T import transfor
 
 ```python
 # tinyinterp/__init__.py
-# Lazy imports everywhere — nothing heavy at import time
+# Keep the public front door small.
 
 from .model import Model
-from .site import Site
 from .maps import replace, add, scale, zero, noise
 from .batch import batch
-
-# These are conditional — only imported when used
-def connect(url, **kwargs):
-    from .server.client import RemoteModel
-    return RemoteModel(url, **kwargs)
-
-def Server(model, **kwargs):
-    from .server.engine import InterpServer
-    return InterpServer(model, **kwargs)
+from .server import Server, InferenceServer
 ```
 
-At `import tinyinterp` time, we import: model.py, site.py, maps.py, batch.py. That's ~600 lines of Python. No torch imports until `ti.Model()` is called. Fast import.
+Current split:
+
+- `ti.Model(...)` is the only public model API
+- `ti.Model("unix:///tmp/tinyinterp.sock")` is the server-backed model path
+- `ti.Server(...)` is the runtime/service object
+
+There is no public `ti.connect(...)` helper and no public `server.model` mirror.
 
 ---
 

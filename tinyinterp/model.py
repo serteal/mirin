@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from typing import Any, cast
@@ -9,12 +10,16 @@ from typing import Any, cast
 import torch
 import torch.nn as nn
 
-from .batch import batch_active, maybe_enqueue_call
 from .context import get_debug, get_graph_path
 from .counters import Counters
 from .debug import log_call_start, log_model_ready, log_timing, render_intervention_graph
+from .executors import _LocalExecutor, _RemoteExecutor
 from .hooks import HookState, MapFn, _EarlyStop, install_hooks
-from .output import Output
+from .output import GenerateOutput, Output, generate_output_from_value, merge_generate_outputs
+from .requests import (
+    normalize_request_row,
+    request_items,
+)
 
 
 class _ModuleProxy:
@@ -110,19 +115,43 @@ class Model:
 
     def __init__(
         self,
-        wrapped: nn.Module | str,
+        wrapped: nn.Module | str | object,
         *,
         rename: Mapping[str, str] | None = None,
         tokenizer: Any | None = None,
         **load_kwargs: Any,
     ) -> None:
+        if _is_server_instance(wrapped):
+            raise TypeError(
+                "ti.Model(server) was removed. Start the server with "
+                '`server.serve(...)` and connect with `ti.Model("unix:///path.sock")`.'
+            )
+        if isinstance(wrapped, str) and _is_remote_endpoint(wrapped):
+            if rename is not None or tokenizer is not None or load_kwargs:
+                raise TypeError(
+                    "Remote ti.Model(...) does not accept rename=, tokenizer=, or loading kwargs."
+                )
+            self.tokenizer = None
+            self._normalize_requests_locally = False
+            self._executor = _RemoteExecutor(_endpoint_path(wrapped))
+            return
         if isinstance(wrapped, str):
             self.wrapped = _load_model(wrapped, **load_kwargs)
+            if not isinstance(self.wrapped, nn.Module):
+                raise TypeError(
+                    "_load_model() must return a torch.nn.Module, "
+                    f"got {type(self.wrapped).__name__}."
+                )
             self.tokenizer = tokenizer if tokenizer is not None else _maybe_load_tokenizer(wrapped)
         else:
             if load_kwargs:
                 raise TypeError(
                     "Loading kwargs are only valid when wrapped is a string model name."
+                )
+            if not isinstance(wrapped, nn.Module):
+                raise TypeError(
+                    "ti.Model(...) expects a torch.nn.Module, a model name/path, "
+                    "or a unix:// endpoint."
                 )
             self.wrapped = wrapped
             self.tokenizer = (
@@ -133,43 +162,30 @@ class Model:
         self._hooks = install_hooks(self.wrapped)
         self._root = _wrap_proxy(self.wrapped, "", self._hooks, self._renames)
         self._layers_proxy: _ModuleListProxy | None = None
+        self._normalize_requests_locally = True
+        self._executor = _LocalExecutor(self)
 
         if get_debug() >= 1:
             log_model_ready(type(self.wrapped).__name__, self._hooks.n_modules)
 
     def __getattr__(self, name: str) -> Any:
-        return getattr(self._root, name)
+        return self._executor.get_attr(name)
 
     def __dir__(self) -> list[str]:
-        return sorted(set(list(object.__dir__(self)) + dir(self._root)))
+        return self._executor.dir()
 
     @property
     def layers(self) -> _ModuleListProxy:
         """Shortcut to the biggest ``ModuleList`` in the model."""
-
-        if self._layers_proxy is None:
-            best: tuple[str, nn.ModuleList] | None = None
-            for path, module in self.wrapped.named_modules():
-                if not isinstance(module, nn.ModuleList):
-                    continue
-                if best is None or _layers_sort_key(path, module) > _layers_sort_key(*best):
-                    best = (path, module)
-            if best is None:
-                raise AttributeError("No ModuleList found. Navigate directly.")
-            proxy = _wrap_proxy(best[1], best[0], self._hooks, self._renames)
-            assert isinstance(proxy, _ModuleListProxy)
-            self._layers_proxy = proxy
-        return self._layers_proxy
+        return self._executor.layers
 
     @property
     def device(self) -> torch.device | tuple[torch.device, ...]:
-        devices = {tensor.device for tensor in self.wrapped.parameters()}
-        devices.update(tensor.device for tensor in self.wrapped.buffers())
-        if not devices:
-            return torch.device("cpu")
-        if len(devices) == 1:
-            return next(iter(devices))
-        return tuple(sorted(devices, key=str))
+        return self._executor.device
+
+    @property
+    def capabilities(self) -> dict[str, Any]:
+        return dict(self._executor.capabilities)
 
     def __call__(
         self,
@@ -180,33 +196,22 @@ class Model:
         stop_at_last_get: bool = False,
         **kwargs: Any,
     ) -> Any:
-        get_proxies = self._normalize_get(get)
-        map_proxies = self._normalize_map(map)
-        if stop_at_last_get:
-            if not get_proxies:
-                raise ValueError("stop_at_last_get=True requires at least one get= site.")
-            if map_proxies:
-                raise ValueError("stop_at_last_get=True does not support map=.")
-            if grad:
-                raise ValueError("stop_at_last_get=True does not support grad=True.")
-            if batch_active():
-                raise ValueError("stop_at_last_get=True is not supported inside ti.batch().")
-        deferred = maybe_enqueue_call(
-            self,
+        if (
+            request_rows := self._normalize_request_args(args, add_generation_prompt=False)
+        ) is not None:
+            return self._executor.call_requests(
+                requests=request_rows,
+                kwargs=_filter_model_kwargs(self.wrapped, kwargs),
+                get=get,
+                mapping=map,
+                grad=grad,
+                stop_at_last_get=stop_at_last_get,
+            )
+        return self._executor.call(
             args=tuple(args),
             kwargs=dict(kwargs),
-            get_proxies=get_proxies,
-            map_proxies=map_proxies,
-            grad=grad,
-            stop_at_last_get=stop_at_last_get,
-        )
-        if deferred is not None:
-            return deferred
-        return self._execute_now(
-            args=tuple(args),
-            kwargs=dict(kwargs),
-            get_proxies=get_proxies,
-            map_proxies=map_proxies,
+            get=get,
+            mapping=map,
             grad=grad,
             stop_at_last_get=stop_at_last_get,
         )
@@ -217,26 +222,76 @@ class Model:
         get: Sequence[_ModuleProxy] | _ModuleProxy | None = None,
         map: dict[_ModuleProxy, MapFn] | None = None,
         stop_at_last_get: bool = False,
+        capture: str = "all",
         **kwargs: Any,
-    ) -> Any:
+    ) -> GenerateOutput:
         """Run generation with hooks active across the whole call."""
 
         if stop_at_last_get:
             raise ValueError("stop_at_last_get=True is not supported for model.generate().")
-        generate_fn = getattr(self.wrapped, "generate", None)
-        if not callable(generate_fn):
-            raise AttributeError(
-                f"Wrapped model {type(self.wrapped).__name__} does not define generate()."
+        if (
+            request_rows := self._normalize_request_args(args, add_generation_prompt=True)
+        ) is not None:
+            return self._normalize_generate_result(
+                self._executor.generate_requests(
+                    requests=request_rows,
+                    kwargs=kwargs,
+                    get=get,
+                    mapping=map,
+                    capture=capture,
+                ),
+                prompt_lengths=[int(row["input_ids"].shape[-1]) for row in request_rows],
             )
-        return self._execute_now(
-            execute=lambda call_kwargs: generate_fn(*args, **call_kwargs),
-            args=tuple(args),
-            kwargs=dict(kwargs),
-            get_proxies=self._normalize_get(get),
-            map_proxies=self._normalize_map(map),
-            grad=False,
-            stop_at_last_get=False,
+        return self._normalize_generate_result(
+            self._executor.generate(
+                args=tuple(args),
+                kwargs=dict(kwargs),
+                get=get,
+                mapping=map,
+                capture=capture,
+            ),
+            prompt_length=self._infer_generate_prompt_length(args, kwargs),
         )
+
+    def collect(
+        self,
+        requests: Sequence[Any] | Any,
+        *,
+        get: Sequence[_ModuleProxy] | _ModuleProxy | None = None,
+        map: dict[_ModuleProxy, MapFn] | None = None,
+        stop_at_last_get: bool = True,
+        **kwargs: Any,
+    ) -> list[Any]:
+        """Collect activations over a request list using the local model API."""
+
+        return self._executor.collect(
+            requests=requests,
+            get=get,
+            mapping=map,
+            stop_at_last_get=stop_at_last_get,
+            kwargs=dict(kwargs),
+        )
+
+    def _normalize_request_args(
+        self,
+        args: tuple[Any, ...],
+        *,
+        add_generation_prompt: bool,
+    ) -> list[dict[str, torch.Tensor]] | None:
+        if not self._normalize_requests_locally:
+            return None
+        if len(args) != 1:
+            return None
+        items = request_items(args[0])
+        if items is None:
+            return None
+        return [
+            self._normalize_request_row(
+                request,
+                add_generation_prompt=add_generation_prompt,
+            )
+            for request in items
+        ]
 
     def _normalize_get(
         self,
@@ -266,6 +321,51 @@ class Model:
             raise ValueError(f"Proxy {proxy.path!r} does not belong to this model.")
         return proxy
 
+    def _normalize_generate_result(
+        self,
+        value: Any,
+        *,
+        prompt_length: int | None = None,
+        prompt_lengths: list[int] | None = None,
+    ) -> GenerateOutput:
+        if isinstance(value, GenerateOutput):
+            return value
+        if isinstance(value, list):
+            if all(isinstance(item, GenerateOutput) for item in value):
+                return merge_generate_outputs(cast(list[GenerateOutput], value))
+            if prompt_lengths is None:
+                raise TypeError(
+                    "model.generate(...) could not infer prompt lengths for batched outputs."
+                )
+            if len(value) != len(prompt_lengths):
+                raise ValueError("model.generate(...) returned an unexpected number of outputs.")
+            return merge_generate_outputs(
+                [
+                    generate_output_from_value(item, prompt_length=prompt_lengths[idx])
+                    for idx, item in enumerate(value)
+                ]
+            )
+        if prompt_length is None:
+            if prompt_lengths is not None and len(prompt_lengths) == 1:
+                prompt_length = prompt_lengths[0]
+            else:
+                raise TypeError(
+                    "model.generate(...) could not infer the prompt length for its output."
+                )
+        return generate_output_from_value(value, prompt_length=prompt_length)
+
+    @staticmethod
+    def _infer_generate_prompt_length(
+        args: tuple[Any, ...],
+        kwargs: Mapping[str, Any],
+    ) -> int | None:
+        input_ids = kwargs.get("input_ids")
+        if isinstance(input_ids, torch.Tensor):
+            return int(input_ids.shape[-1])
+        if args and isinstance(args[0], torch.Tensor):
+            return int(args[0].shape[-1])
+        return None
+
     def _execute_now(
         self,
         *,
@@ -277,6 +377,7 @@ class Model:
         stop_at_last_get: bool = False,
         requested_calls: int = 1,
         execute: Callable[[dict[str, Any]], Any] | None = None,
+        always_output: bool = False,
     ) -> Any:
         if execute is None:
 
@@ -295,7 +396,7 @@ class Model:
             )
 
         t0 = time.perf_counter_ns()
-        self._hooks.activate(
+        hook_token = self._hooks.activate(
             get_proxies,
             map_proxies,
             grad=grad,
@@ -317,7 +418,7 @@ class Model:
             raise
         finally:
             t2 = time.perf_counter_ns()
-            activations = self._hooks.collect_and_deactivate(strict=not failed)
+            activations = self._hooks.collect_and_deactivate(hook_token, strict=not failed)
             t3 = time.perf_counter_ns()
 
         forward_ns = t2 - t1
@@ -349,14 +450,31 @@ class Model:
         if not failed and graph_path is not None and (get_proxies or map_proxies):
             render_intervention_graph(get_proxies, map_proxies, output_path=graph_path)
 
-        if not get_proxies and not map_proxies:
+        if not always_output and not get_proxies and not map_proxies:
             return model_output
         return Output(
             model_output,
             activations,
             self._hooks.id_map,
+            path_to_sid=self._hooks.path_to_sid,
             completed_forward=not stopped_early,
         )
+
+    def _normalize_request_row(
+        self,
+        request: Any,
+        *,
+        add_generation_prompt: bool,
+    ) -> dict[str, torch.Tensor]:
+        return normalize_request_row(
+            request,
+            tokenizer=self.tokenizer,
+            add_generation_prompt=add_generation_prompt,
+            owner="Model",
+        )
+
+    def close(self) -> None:
+        self._executor.close()
 
 
 def _wrap_proxy(
@@ -390,6 +508,36 @@ def _layers_sort_key(path: str, module: nn.ModuleList) -> tuple[int, int, int]:
     if "vision" in lowered:
         score -= 500
     return (score, len(module), -lowered.count("."))
+
+
+def _filter_model_kwargs(model: nn.Module, kwargs: Mapping[str, Any]) -> dict[str, Any]:
+    forward = getattr(model, "forward", None)
+    if forward is None:
+        return dict(kwargs)
+    try:
+        signature = inspect.signature(forward)
+    except (TypeError, ValueError):
+        return dict(kwargs)
+    if any(param.kind is inspect.Parameter.VAR_KEYWORD for param in signature.parameters.values()):
+        return dict(kwargs)
+    allowed = set(signature.parameters)
+    return {key: value for key, value in kwargs.items() if key in allowed}
+
+
+def _endpoint_path(path: str) -> str:
+    return path[len("unix://") :]
+
+
+def _is_remote_endpoint(path: str) -> bool:
+    return path.startswith("unix://")
+
+
+def _is_server_instance(value: object) -> bool:
+    try:
+        from .server.inference import Server
+    except Exception:
+        return False
+    return isinstance(value, Server)
 
 
 def _load_model(name_or_path: str, **load_kwargs: Any) -> nn.Module:

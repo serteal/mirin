@@ -1,8 +1,12 @@
-"""Phase 4 benchmark harness for the inference server."""
+"""Server runtime benchmark harness for the inference server."""
 
 from __future__ import annotations
 
 import json
+import os
+import threading
+import time
+import uuid
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -11,7 +15,6 @@ from typing import Any, cast
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 import tinyinterp as ti
 from tinyinterp.hooks import _extract
@@ -22,7 +25,13 @@ from tinyinterp.server.runtime import (
     filter_supported_kwargs,
 )
 
-from .phase3 import _environment_report, _measure_case, _resolve_device, _resolve_dtype
+from .model_api import (
+    _config_value,
+    _environment_report,
+    _measure_case,
+    _resolve_device,
+    _resolve_dtype,
+)
 
 DEFAULT_MODEL_NAMES = (
     "meta-llama/Llama-3.1-8B-Instruct",
@@ -32,10 +41,10 @@ DEFAULT_MODEL_NAMES = (
 
 
 @dataclass(slots=True)
-class ServerBenchmarkConfig:
-    """Configuration for the Phase 4 inference-server benchmarks."""
+class RuntimeInternalsBenchmarkConfig:
+    """Configuration for the runtime-internals benchmarks."""
 
-    model_name: str | None = None
+    model_name: str
     device: str = "auto"
     dtype: str = "bfloat16"
     seed: int = 7
@@ -46,138 +55,11 @@ class ServerBenchmarkConfig:
     max_new_tokens: int = 16
     warmup: int = 1
     trials: int = 5
-    layers: int = 4
-    width: int = 128
-    n_heads: int = 4
-    vocab_size: int = 256
     json_output: str | None = None
 
 
-@dataclass
-class _SyntheticOutput:
-    logits: torch.Tensor
-
-    def __getitem__(self, index: int | slice) -> torch.Tensor | tuple[torch.Tensor, ...]:
-        return (self.logits,)[index]
-
-
-class _SyntheticAttention(nn.Module):
-    def __init__(self, width: int, n_heads: int) -> None:
-        super().__init__()
-        self.n_heads = n_heads
-        self.c_attn = nn.Linear(width, width * 3)
-        self.c_proj = nn.Linear(width, width)
-
-    def forward(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor]:
-        qkv = self.c_attn(hidden_states)
-        q, k, v = qkv.chunk(3, dim=-1)
-        q = _reshape_heads(q, self.n_heads)
-        k = _reshape_heads(k, self.n_heads)
-        v = _reshape_heads(v, self.n_heads)
-        scores = torch.einsum("bthd,bshd->bhts", q, k) / (q.shape[-1] ** 0.5)
-        weights = torch.softmax(scores, dim=-1)
-        context = torch.einsum("bhts,bshd->bthd", weights, v)
-        return (self.c_proj(context.reshape(*context.shape[:-2], -1)),)
-
-
-class _SyntheticMlp(nn.Module):
-    def __init__(self, width: int) -> None:
-        super().__init__()
-        hidden = width * 4
-        self.c_fc = nn.Linear(width, hidden)
-        self.c_proj = nn.Linear(hidden, width)
-
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        return self.c_proj(F.gelu(self.c_fc(hidden_states)))
-
-
-class _SyntheticBlock(nn.Module):
-    def __init__(self, width: int, n_heads: int) -> None:
-        super().__init__()
-        self.ln_1 = nn.LayerNorm(width)
-        self.attn = _SyntheticAttention(width, n_heads)
-        self.ln_2 = nn.LayerNorm(width)
-        self.mlp = _SyntheticMlp(width)
-
-    def forward(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor]:
-        hidden_states = hidden_states + self.attn(self.ln_1(hidden_states))[0]
-        hidden_states = hidden_states + self.mlp(self.ln_2(hidden_states))
-        return (hidden_states,)
-
-
-class _SyntheticBackbone(nn.Module):
-    h: nn.ModuleList
-
-    def __init__(self, width: int, layers: int, n_heads: int) -> None:
-        super().__init__()
-        self.h = nn.ModuleList(_SyntheticBlock(width, n_heads) for _ in range(layers))
-
-
-class SyntheticServerModel(nn.Module):
-    """Small synthetic CausalLM with a GPT-style block stack and generate()."""
-
-    def __init__(
-        self,
-        *,
-        vocab_size: int,
-        width: int,
-        layers: int,
-        n_heads: int,
-        seq_len: int,
-    ) -> None:
-        super().__init__()
-        self.wte = nn.Embedding(vocab_size, width)
-        self.wpe = nn.Embedding(seq_len + 64, width)
-        self.transformer = _SyntheticBackbone(width, layers, n_heads)
-        self.ln_f = nn.LayerNorm(width)
-        self.lm_head = nn.Linear(width, vocab_size, bias=False)
-        self.config = SimpleNamespace(
-            model_type="synthetic-causallm",
-            n_layer=layers,
-            n_head=n_heads,
-            n_embd=width,
-            vocab_size=vocab_size,
-            _attn_implementation="eager",
-        )
-
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        *,
-        attention_mask: torch.Tensor | None = None,
-        use_cache: bool = False,
-    ) -> _SyntheticOutput:
-        del attention_mask, use_cache
-        positions = torch.arange(input_ids.shape[1], device=input_ids.device).unsqueeze(0)
-        hidden_states = self.wte(input_ids) + self.wpe(positions)
-        for block in self.transformer.h:
-            hidden_states = block(hidden_states)[0]
-        return _SyntheticOutput(logits=self.lm_head(self.ln_f(hidden_states)))
-
-    def generate(
-        self,
-        *,
-        input_ids: torch.Tensor,
-        attention_mask: torch.Tensor | None = None,
-        max_new_tokens: int = 1,
-        do_sample: bool = False,
-        use_cache: bool = False,
-    ) -> torch.Tensor:
-        del attention_mask, use_cache
-        tokens = input_ids.clone()
-        for _ in range(max_new_tokens):
-            logits = self(input_ids=tokens).logits[:, -1, :]
-            if do_sample:
-                probs = torch.softmax(logits, dim=-1)
-                next_token = torch.multinomial(probs, num_samples=1)
-            else:
-                next_token = logits.argmax(dim=-1, keepdim=True)
-            tokens = torch.cat([tokens, next_token], dim=-1)
-        return tokens
-
-
-def run_phase4_server_benchmarks(config: ServerBenchmarkConfig) -> dict[str, Any]:
-    """Run the server benchmark matrix for one model."""
+def run_runtime_internals_benchmarks(config: RuntimeInternalsBenchmarkConfig) -> dict[str, Any]:
+    """Run the runtime-internals benchmark matrix for one model."""
 
     torch.manual_seed(config.seed)
     device = _resolve_device(config.device)
@@ -230,7 +112,7 @@ def run_phase4_server_benchmarks(config: ServerBenchmarkConfig) -> dict[str, Any
         cases.append(
             _measure_case(
                 "hf_hook_loop",
-                lambda: manual_runner.run(dataset),
+                lambda runner=manual_runner, rows=dataset: runner.run(rows),
                 warmup=config.warmup,
                 trials=config.trials,
                 device=device,
@@ -239,7 +121,11 @@ def run_phase4_server_benchmarks(config: ServerBenchmarkConfig) -> dict[str, Any
         cases.append(
             _measure_case(
                 "hf_generate_single",
-                lambda: _hf_generate(hf_model, single_prompt, max_new_tokens=config.max_new_tokens),
+                lambda model=hf_model, row=single_prompt: _hf_generate(
+                    model,
+                    row,
+                    max_new_tokens=config.max_new_tokens,
+                ),
                 warmup=config.warmup,
                 trials=config.trials,
                 device=device,
@@ -248,9 +134,9 @@ def run_phase4_server_benchmarks(config: ServerBenchmarkConfig) -> dict[str, Any
         cases.append(
             _measure_case(
                 "hf_generate_multi_sequential",
-                lambda: _hf_generate_sequential(
-                    hf_model,
-                    prompts,
+                lambda model=hf_model, rows=prompts: _hf_generate_sequential(
+                    model,
+                    rows,
                     max_new_tokens=config.max_new_tokens,
                 ),
                 warmup=config.warmup,
@@ -261,7 +147,11 @@ def run_phase4_server_benchmarks(config: ServerBenchmarkConfig) -> dict[str, Any
         cases.append(
             _measure_case(
                 "hf_generate_multi_batched",
-                lambda: _hf_generate(hf_model, prompts, max_new_tokens=config.max_new_tokens),
+                lambda model=hf_model, rows=prompts: _hf_generate(
+                    model,
+                    rows,
+                    max_new_tokens=config.max_new_tokens,
+                ),
                 warmup=config.warmup,
                 trials=config.trials,
                 device=device,
@@ -269,6 +159,7 @@ def run_phase4_server_benchmarks(config: ServerBenchmarkConfig) -> dict[str, Any
         )
     finally:
         manual_runner.close()
+        del manual_runner, hf_model
         _clear_cuda(device)
 
     local_model = _load_model(config, device=device, dtype=dtype)
@@ -277,7 +168,25 @@ def run_phase4_server_benchmarks(config: ServerBenchmarkConfig) -> dict[str, Any
     cases.append(
         _measure_case(
             "tinyinterp_capture_loop",
-            lambda: _tinyinterp_capture_loop(local_ti, local_proxy, dataset),
+            lambda model=local_ti, proxy=local_proxy, rows=dataset: _tinyinterp_capture_loop(
+                model,
+                proxy,
+                rows,
+            ),
+            warmup=config.warmup,
+            trials=config.trials,
+            device=device,
+            use_counters=True,
+        )
+    )
+    cases.append(
+        _measure_case(
+            "model_collect_local",
+            lambda model=local_ti, proxy=local_proxy, rows=dataset: _model_collect_loop(
+                model,
+                proxy,
+                rows,
+            ),
             warmup=config.warmup,
             trials=config.trials,
             device=device,
@@ -303,6 +212,20 @@ def run_phase4_server_benchmarks(config: ServerBenchmarkConfig) -> dict[str, Any
         _measure_case(
             "server_collector",
             lambda: _server_collector_loop(collector, dataset, site_path),
+            warmup=config.warmup,
+            trials=config.trials,
+            device=device,
+            use_counters=True,
+        )
+    )
+    cases.append(
+        _measure_case(
+            "server_call_concurrent_stateless",
+            lambda: _server_call_concurrent(
+                server,
+                empty_plan,
+                _requests_from_batch(dataset[0])[:2],
+            ),
             warmup=config.warmup,
             trials=config.trials,
             device=device,
@@ -405,9 +328,9 @@ def run_phase4_server_benchmarks(config: ServerBenchmarkConfig) -> dict[str, Any
     cases.append(
         _measure_case(
             "tinyinterp_generate_map_batched",
-            lambda: _tinyinterp_generate_batched(
-                local_ti,
-                prompts,
+            lambda model=local_ti, rows=prompts: _tinyinterp_generate_batched(
+                model,
+                rows,
                 max_new_tokens=config.max_new_tokens,
                 mapping={local_proxy: ti.zero()},
             ),
@@ -420,9 +343,9 @@ def run_phase4_server_benchmarks(config: ServerBenchmarkConfig) -> dict[str, Any
     cases.append(
         _measure_case(
             "tinyinterp_decode_get_batched",
-            lambda: _tinyinterp_decode_batched(
-                local_ti,
-                prompts,
+            lambda model=local_ti, rows=prompts: _tinyinterp_decode_batched(
+                model,
+                rows,
                 max_new_tokens=config.max_new_tokens,
                 proxy=local_proxy,
             )[1],
@@ -451,9 +374,9 @@ def run_phase4_server_benchmarks(config: ServerBenchmarkConfig) -> dict[str, Any
     cases.append(
         _measure_case(
             "tinyinterp_decode_map_batched",
-            lambda: _tinyinterp_decode_batched(
-                local_ti,
-                prompts,
+            lambda model=local_ti, rows=prompts: _tinyinterp_decode_batched(
+                model,
+                rows,
                 max_new_tokens=config.max_new_tokens,
                 mapping={local_proxy: ti.zero()},
             )[1],
@@ -503,6 +426,41 @@ def run_phase4_server_benchmarks(config: ServerBenchmarkConfig) -> dict[str, Any
                 "skipped": "unsupported_static_cache",
             }
         )
+    remote_sock = f"/tmp/tinyinterp-bench-{uuid.uuid4().hex}.sock"
+    remote_thread = threading.Thread(target=server.serve, args=(remote_sock,), daemon=True)
+    remote_thread.start()
+    remote_client = _open_remote_model(remote_sock)
+    remote_proxy = _resolve_proxy(remote_client, site_path)
+    cases.append(
+        _measure_case(
+            "model_collect_remote",
+            lambda: _model_collect_loop(remote_client, remote_proxy, dataset),
+            warmup=config.warmup,
+            trials=config.trials,
+            device=device,
+            use_counters=True,
+        )
+    )
+    cases.append(
+        _measure_case(
+            "model_generate_remote",
+            lambda: remote_client.generate(
+                prompt_requests,
+                max_new_tokens=config.max_new_tokens,
+                do_sample=False,
+            ),
+            warmup=config.warmup,
+            trials=config.trials,
+            device=device,
+            use_counters=True,
+        )
+    )
+    remote_client.close()
+    server.close()
+    del local_ti, local_model
+    del server_model
+    if os.path.exists(remote_sock):
+        os.unlink(remote_sock)
     server_stats = server.stats()
 
     _annotate_server_metrics(cases, config=config)
@@ -523,15 +481,15 @@ def run_phase4_server_benchmarks(config: ServerBenchmarkConfig) -> dict[str, Any
     return report
 
 
-def run_phase4_server_suite(
-    configs: list[ServerBenchmarkConfig],
+def run_runtime_internals_suite(
+    configs: list[RuntimeInternalsBenchmarkConfig],
     *,
     json_output: str | None = None,
 ) -> dict[str, Any]:
     reports: list[dict[str, Any]] = []
     for config in configs:
         try:
-            reports.append(run_phase4_server_benchmarks(config))
+            reports.append(run_runtime_internals_benchmarks(config))
         except Exception as exc:
             reports.append(
                 {
@@ -547,7 +505,7 @@ def run_phase4_server_suite(
     return suite
 
 
-def format_phase4_server_report(report: Mapping[str, Any]) -> str:
+def format_runtime_internals_report(report: Mapping[str, Any]) -> str:
     env = cast(dict[str, Any], report["environment"])
     lines = [
         f"Model: {env['model_name']} ({env['architecture']})",
@@ -577,19 +535,19 @@ def format_phase4_server_report(report: Mapping[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def format_phase4_server_suite(suite: Mapping[str, Any]) -> str:
+def format_runtime_internals_suite(suite: Mapping[str, Any]) -> str:
     blocks: list[str] = []
     for report in cast(list[dict[str, Any]], suite["reports"]):
         if "load_error" in report:
             config = cast(dict[str, Any], report["config"])
             blocks.append(f"Model: {config['model_name']}\n  load_error: {report['load_error']}")
             continue
-        blocks.append(format_phase4_server_report(report))
+        blocks.append(format_runtime_internals_report(report))
     return "\n\n".join(blocks)
 
 
 def _correctness_checks(
-    config: ServerBenchmarkConfig,
+    config: RuntimeInternalsBenchmarkConfig,
     *,
     device: torch.device,
     dtype: torch.dtype,
@@ -627,6 +585,20 @@ def _correctness_checks(
         "ok": torch.allclose(server_act, manual, atol=1e-4, rtol=1e-4),
         "max_abs_diff": float((server_act - manual).abs().max().item()),
     }
+    remote_sock = f"/tmp/tinyinterp-correctness-{uuid.uuid4().hex}.sock"
+    remote_thread = threading.Thread(target=server.serve, args=(remote_sock,), daemon=True)
+    remote_thread.start()
+    remote_client = _open_remote_model(remote_sock)
+    remote_proxy = _resolve_proxy(remote_client, site_path)
+    api_collect = remote_client.collect(_requests_from_batch(batch), get=[remote_proxy])
+    api_collect_act = torch.cat(
+        [cast(torch.Tensor, output[remote_proxy]).cpu() for output in api_collect],
+        dim=0,
+    )
+    checks["collect_api_remote_vs_hf"] = {
+        "ok": torch.allclose(api_collect_act, manual, atol=1e-4, rtol=1e-4),
+        "max_abs_diff": float((api_collect_act - manual).abs().max().item()),
+    }
     empty_plan = server.compile(output={"logits": True, "activations": False})
     steer_plan = server.compile(
         mapping={site_path: ti.zero()}, output={"logits": True, "activations": False}
@@ -652,7 +624,7 @@ def _correctness_checks(
             max_new_tokens=config.max_new_tokens,
             do_sample=False,
         ),
-        pad_token_id=_pad_token_id(server.model.wrapped),
+        pad_token_id=_pad_token_id(server._model.wrapped),
     )
     server_many_map = _pad_batch_sequences(
         server.generate_many(
@@ -661,7 +633,15 @@ def _correctness_checks(
             max_new_tokens=config.max_new_tokens,
             do_sample=False,
         ),
-        pad_token_id=_pad_token_id(server.model.wrapped),
+        pad_token_id=_pad_token_id(server._model.wrapped),
+    )
+    model_generate_remote = _normalize_generated_batch(
+        remote_client.generate(
+            _requests_from_batch(prompts),
+            max_new_tokens=config.max_new_tokens,
+            do_sample=False,
+        ),
+        pad_token_id=_pad_token_id(server._model.wrapped),
     )
     server_multi = _server_multi_session(
         server,
@@ -669,6 +649,10 @@ def _correctness_checks(
         prompts,
         max_new_tokens=config.max_new_tokens,
     )
+    remote_client.close()
+    server.close()
+    if os.path.exists(remote_sock):
+        os.unlink(remote_sock)
     del server
     _clear_cuda(device)
 
@@ -688,6 +672,9 @@ def _correctness_checks(
     }
     checks["generate_many_plain"] = {
         "ok": torch.equal(server_many_plain, hf_batched),
+    }
+    checks["model_generate_remote"] = {
+        "ok": torch.equal(model_generate_remote.to(hf_batched.device), hf_batched),
     }
     checks["generate_multi"] = {
         "ok": torch.equal(server_multi, hf_multi),
@@ -791,6 +778,21 @@ def _server_collector_loop(
     return total
 
 
+def _model_collect_loop(
+    model: Any,
+    proxy: Any,
+    dataset: list[dict[str, torch.Tensor]],
+) -> float:
+    total = 0.0
+    for batch in dataset:
+        outputs = model.collect(_requests_from_batch(batch), get=[proxy])
+        total += sum(
+            float(cast(torch.Tensor, output[proxy]).detach().cpu().float().sum().item())
+            for output in outputs
+        )
+    return total
+
+
 def _server_multi_session(
     server: ti.Server,
     plan: Any,
@@ -834,7 +836,7 @@ def _server_multi_session(
             )
         return _pad_batch_sequences(
             outputs,
-            pad_token_id=_pad_token_id(server.model.wrapped),
+            pad_token_id=_pad_token_id(server._model.wrapped),
         )
     finally:
         for session in sessions:
@@ -892,11 +894,49 @@ def _server_multi_session_stepwise(
                 )
             )
         return _pad_batch_sequences(
-            outputs, pad_token_id=_pad_token_id(server.model.wrapped)
+            outputs, pad_token_id=_pad_token_id(server._model.wrapped)
         ), total
     finally:
         for session in sessions:
             server.close_session(session)
+
+
+def _server_call_concurrent(
+    server: ti.Server,
+    plan: Any,
+    requests: list[dict[str, torch.Tensor]],
+) -> float:
+    rows = [
+        {
+            key: (
+                value.unsqueeze(0) if isinstance(value, torch.Tensor) and value.ndim == 1 else value
+            )
+            for key, value in request.items()
+        }
+        for request in requests
+    ]
+    totals = [0.0 for _ in rows]
+    errors: list[BaseException] = []
+
+    def worker(idx: int, request: Mapping[str, torch.Tensor]) -> None:
+        try:
+            result = server.call(plan, **request)
+            logits = cast(torch.Tensor, result.logits)
+            totals[idx] = float(logits.detach().cpu().float().sum().item())
+        except BaseException as exc:
+            errors.append(exc)
+
+    threads = [
+        threading.Thread(target=worker, args=(idx, request), daemon=True)
+        for idx, request in enumerate(rows)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    if errors:
+        raise RuntimeError("Concurrent stateless server.call benchmark failed.") from errors[0]
+    return sum(totals)
 
 
 def _tinyinterp_decode_batched(
@@ -1012,9 +1052,9 @@ def _tinyinterp_generate_batched(
         max_new_tokens=max_new_tokens,
         do_sample=False,
     )
-    if isinstance(output, ti.Output):
-        return cast(torch.Tensor, output._model_output)
-    return cast(torch.Tensor, output)
+    if isinstance(output, ti.GenerateOutput):
+        return cast(torch.Tensor, output.sequences)
+    return cast(torch.Tensor, output.sequences)
 
 
 def _hf_generate(
@@ -1082,16 +1122,26 @@ def _prepare_generation_inputs(
             "past_key_values": cache,
             "use_cache": True,
         }
-    prepared = cast(
-        Mapping[str, Any],
-        prepare(
-            input_ids,
-            attention_mask=attention_mask,
-            past_key_values=cache,
-            use_cache=True,
-        ),
-    )
+    prepare_kwargs = {
+        "attention_mask": attention_mask,
+        "past_key_values": cache,
+        "use_cache": True,
+    }
+    cache_position = _cache_position(cache, input_ids)
+    if cache_position is not None:
+        prepare_kwargs["cache_position"] = cache_position
+    prepared = cast(Mapping[str, Any], prepare(input_ids, **prepare_kwargs))
     return {**prepared, "use_cache": True}
+
+
+def _cache_position(cache: Any, input_ids: torch.Tensor) -> torch.Tensor | None:
+    if cache is None:
+        start = 0
+    elif callable(getattr(cache, "get_seq_length", None)):
+        start = int(cache.get_seq_length())
+    else:
+        return None
+    return torch.arange(start, start + input_ids.shape[-1], device=input_ids.device)
 
 
 class _ManualHookLoop:
@@ -1156,6 +1206,19 @@ def _resolve_proxy(model: ti.Model, path: str) -> Any:
     return current
 
 
+def _open_remote_model(sock_path: str) -> Any:
+    deadline = time.time() + 5.0
+    while time.time() < deadline:
+        if os.path.exists(sock_path):
+            try:
+                return ti.Model(f"unix://{sock_path}")
+            except OSError:
+                time.sleep(0.02)
+                continue
+        time.sleep(0.02)
+    raise RuntimeError(f"Remote benchmark server did not open {sock_path}.")
+
+
 def _supports_static_cache(model: nn.Module) -> bool:
     config = getattr(model, "config", None)
     if config is None:
@@ -1171,22 +1234,11 @@ def _supports_static_cache(model: nn.Module) -> bool:
 
 
 def _load_model(
-    config: ServerBenchmarkConfig,
+    config: RuntimeInternalsBenchmarkConfig,
     *,
     device: torch.device,
     dtype: torch.dtype,
 ) -> nn.Module:
-    if config.model_name is None:
-        torch.manual_seed(config.seed)
-        model = SyntheticServerModel(
-            vocab_size=config.vocab_size,
-            width=config.width,
-            layers=config.layers,
-            n_heads=config.n_heads,
-            seq_len=config.seq_len,
-        )
-        return model.to(device=device, dtype=dtype if dtype != torch.float32 else None).eval()
-
     try:
         from transformers import AutoModelForCausalLM
     except ImportError as exc:
@@ -1225,18 +1277,11 @@ def _make_dataset(
     return outputs
 
 
-def _site_path(model_name: str | None, model: nn.Module) -> str:
-    if model_name is None:
-        return "transformer.h.0.attn"
-    lower = model_name.lower()
-    if "gemma" in lower:
-        return "model.language_model.layers.0.self_attn"
-    if "llama" in lower:
-        return "model.layers.0.self_attn"
-    if "qwen" in lower:
-        return "model.layers.0.linear_attn"
+def _site_path(model_name: str, model: nn.Module) -> str:
     wrapper = ti.Model(model, rename=ti.renames.llm)
-    site = ti.find(wrapper.layers[0], "self_attn")
+    site = ti.find(wrapper.layers[0], "linear_attn")
+    if site is None:
+        site = ti.find(wrapper.layers[0], "self_attn")
     if site is None:
         site = ti.find(wrapper.layers[0], "attn")
     if site is None:
@@ -1247,7 +1292,7 @@ def _site_path(model_name: str | None, model: nn.Module) -> str:
 def _annotate_server_metrics(
     cases: list[dict[str, Any]],
     *,
-    config: ServerBenchmarkConfig,
+    config: RuntimeInternalsBenchmarkConfig,
 ) -> None:
     examples = config.dataset_batch_size * config.dataset_batches
     single_tokens = config.max_new_tokens
@@ -1283,7 +1328,7 @@ def _annotate_server_metrics(
 
 def _vocab_size(model: nn.Module) -> int:
     config = getattr(model, "config", SimpleNamespace(vocab_size=256))
-    return int(getattr(config, "vocab_size", 256))
+    return int(_config_value(config, "vocab_size") or 256)
 
 
 def _reshape_heads(tensor: torch.Tensor, n_heads: int) -> torch.Tensor:
@@ -1311,6 +1356,25 @@ def _pad_batch_sequences(sequences: list[torch.Tensor], *, pad_token_id: int) ->
         )
         padded.append(torch.cat([sequence, pad], dim=-1))
     return torch.cat(padded, dim=0)
+
+
+def _normalize_generated_batch(value: Any, *, pad_token_id: int) -> torch.Tensor:
+    if isinstance(value, ti.GenerateOutput):
+        return cast(torch.Tensor, value.sequences)
+    if (
+        isinstance(value, list)
+        and value
+        and all(isinstance(item, ti.GenerateOutput) for item in value)
+    ):
+        return _pad_batch_sequences(
+            [cast(torch.Tensor, item.sequences) for item in cast(list[ti.GenerateOutput], value)],
+            pad_token_id=pad_token_id,
+        )
+    if not isinstance(value, list) or not all(isinstance(item, torch.Tensor) for item in value):
+        raise TypeError(
+            f"Expected GenerateOutput or list[GenerateOutput], got {type(value).__name__}."
+        )
+    return _pad_batch_sequences(cast(list[torch.Tensor], value), pad_token_id=pad_token_id)
 
 
 def _pad_token_id(model: nn.Module) -> int:

@@ -1,4 +1,4 @@
-"""Phase 3 benchmarking harness for tinyinterp."""
+"""Model API benchmarking harness for tinyinterp."""
 
 from __future__ import annotations
 
@@ -20,6 +20,8 @@ import tinyinterp as ti
 from tinyinterp.hooks import _extract, _replace
 from tinyinterp.output import Output
 
+from .tolerances import comparison_tolerances
+
 DEFAULT_MODEL_NAMES = (
     "meta-llama/Llama-3.1-8B-Instruct",
     "google/gemma-3-4b-it",
@@ -39,17 +41,13 @@ _PROMPT_STEMS = (
 
 
 @dataclass(slots=True)
-class BenchmarkConfig:
-    """Configuration for the Phase 3 benchmark suite."""
+class ModelApiBenchmarkConfig:
+    """Configuration for the model API benchmark suite."""
 
-    model_name: str | None = None
+    model_name: str
     device: str = "auto"
     dtype: str = "bfloat16"
     seed: int = 7
-    layers: int = 12
-    width: int = 768
-    n_heads: int = 12
-    vocab_size: int = 4096
     seq_len: int = 256
     batch_size: int = 8
     micro_warmup: int = 5
@@ -60,138 +58,8 @@ class BenchmarkConfig:
     get_one_stop_at_last: bool = True
     json_output: str | None = None
 
-
-@dataclass
-class BenchmarkOutput:
-    """Minimal model output carrying logits like HuggingFace outputs."""
-
-    logits: torch.Tensor
-
-    def __getitem__(self, index: int | slice) -> torch.Tensor | tuple[torch.Tensor, ...]:
-        return (self.logits,)[index]
-
-
-class BenchmarkAttention(nn.Module):
-    """Small eager attention module for the synthetic causal-LM workload."""
-
-    supports_attention_pattern = True
-
-    def __init__(self, width: int, n_heads: int) -> None:
-        super().__init__()
-        self.n_heads = n_heads
-        self.c_attn = nn.Linear(width, width * 3)
-        self.c_proj = nn.Linear(width, width)
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        *,
-        output_attentions: bool = False,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        qkv = self.c_attn(hidden_states)
-        q, k, v = qkv.chunk(3, dim=-1)
-        q_heads = _reshape_heads(q, self.n_heads)
-        k_heads = _reshape_heads(k, self.n_heads)
-        v_heads = _reshape_heads(v, self.n_heads)
-        scores = torch.einsum("bthd,bshd->bhts", q_heads, k_heads) / (q_heads.shape[-1] ** 0.5)
-        weights = torch.softmax(scores, dim=-1)
-        context = torch.einsum("bhts,bshd->bthd", weights, v_heads)
-        attn_out = self.c_proj(context.reshape(*context.shape[:-2], -1))
-        return attn_out, (weights if output_attentions else None)
-
-
-class BenchmarkMlp(nn.Module):
-    """Small MLP for the synthetic causal-LM workload."""
-
-    def __init__(self, width: int) -> None:
-        super().__init__()
-        hidden = width * 4
-        self.c_fc = nn.Linear(width, hidden)
-        self.act = nn.GELU()
-        self.c_proj = nn.Linear(hidden, width)
-
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        return self.c_proj(self.act(self.c_fc(hidden_states)))
-
-
-class BenchmarkBlock(nn.Module):
-    """Residual attention + MLP block for the synthetic causal-LM workload."""
-
-    def __init__(self, width: int, n_heads: int) -> None:
-        super().__init__()
-        self.ln_1 = nn.LayerNorm(width)
-        self.attn = BenchmarkAttention(width, n_heads)
-        self.ln_2 = nn.LayerNorm(width)
-        self.mlp = BenchmarkMlp(width)
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        *,
-        output_attentions: bool = False,
-    ) -> tuple[torch.Tensor]:
-        attn_out = self.attn(self.ln_1(hidden_states), output_attentions=output_attentions)[0]
-        hidden_states = hidden_states + attn_out
-        hidden_states = hidden_states + self.mlp(self.ln_2(hidden_states))
-        return (hidden_states,)
-
-
-class BenchmarkBackbone(nn.Module):
-    """Backbone exposing a generic ``transformer.h`` stack."""
-
-    h: nn.ModuleList
-
-    def __init__(self, width: int, n_layers: int, n_heads: int) -> None:
-        super().__init__()
-        self.h = nn.ModuleList(BenchmarkBlock(width, n_heads) for _ in range(n_layers))
-
-
-class BenchmarkCausalLmModel(nn.Module):
-    """Synthetic workload used by the benchmark harness."""
-
-    def __init__(
-        self,
-        *,
-        vocab_size: int,
-        width: int,
-        n_layers: int,
-        n_heads: int,
-        max_positions: int,
-    ) -> None:
-        super().__init__()
-        self.wte = nn.Embedding(vocab_size, width)
-        self.wpe = nn.Embedding(max_positions, width)
-        self.transformer = BenchmarkBackbone(width, n_layers, n_heads)
-        self.ln_f = nn.LayerNorm(width)
-        self.lm_head = nn.Linear(width, vocab_size, bias=False)
-        self.config = SimpleNamespace(
-            model_type="benchmark-causallmish",
-            n_layer=n_layers,
-            n_head=n_heads,
-            n_embd=width,
-            n_positions=max_positions,
-            vocab_size=vocab_size,
-            _attn_implementation="eager",
-        )
-
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        *,
-        attention_mask: torch.Tensor | None = None,
-        output_attentions: bool = False,
-    ) -> BenchmarkOutput:
-        del attention_mask
-        positions = torch.arange(input_ids.shape[1], device=input_ids.device).unsqueeze(0)
-        hidden_states = self.wte(input_ids) + self.wpe(positions)
-        for block in self.transformer.h:
-            hidden_states = block(hidden_states, output_attentions=output_attentions)[0]
-        logits = self.lm_head(self.ln_f(hidden_states))
-        return BenchmarkOutput(logits=logits)
-
-
-def run_phase3_benchmarks(config: BenchmarkConfig) -> dict[str, Any]:
-    """Run the full Phase 3 benchmark matrix and return a structured report."""
+def run_model_api_benchmarks(config: ModelApiBenchmarkConfig) -> dict[str, Any]:
+    """Run the full model API benchmark matrix and return a structured report."""
 
     torch.manual_seed(config.seed)
     device = _resolve_device(config.device)
@@ -336,23 +204,23 @@ def run_phase3_benchmarks(config: BenchmarkConfig) -> dict[str, Any]:
     return report
 
 
-def run_phase3_suite(
-    configs: list[BenchmarkConfig],
+def run_model_api_suite(
+    configs: list[ModelApiBenchmarkConfig],
     *,
     json_output: str | None = None,
 ) -> dict[str, Any]:
-    """Run several Phase 3 benchmark configs and return an aggregate report."""
+    """Run several model API benchmark configs and return an aggregate report."""
 
     reports = []
     for config in configs:
         config.json_output = None
         try:
-            reports.append(run_phase3_benchmarks(config))
+            reports.append(run_model_api_benchmarks(config))
         except Exception as exc:
             reports.append(
                 {
                     "ok": False,
-                    "model_name": config.model_name or "synthetic",
+                    "model_name": config.model_name,
                     "error_type": type(exc).__name__,
                     "error": str(exc),
                 }
@@ -365,12 +233,12 @@ def run_phase3_suite(
     return suite
 
 
-def format_report(report: dict[str, Any]) -> str:
+def format_model_api_report(report: dict[str, Any]) -> str:
     """Render a structured report as readable plain text."""
 
     env = report["environment"]
     lines = [
-        "Phase 3 Benchmark Report",
+        "Model API Benchmark Report",
         f"model: {env['model_name']}  attn={env['attention_impl']}",
         (
             f"device: {env['device']}  dtype={env['dtype']}  gpu={env['gpu_name']}  "
@@ -385,9 +253,7 @@ def format_report(report: dict[str, Any]) -> str:
     ]
     for name, check in report["correctness"].items():
         status = "ok" if check["ok"] else "FAIL"
-        lines.append(
-            f"  {name:<14} {status}  max_abs_diff={check['max_abs_diff']:.6g}"
-        )
+        lines.append(f"  {name:<14} {status}  max_abs_diff={check['max_abs_diff']:.6g}")
 
     lines.append("")
     lines.append("Cases")
@@ -431,19 +297,19 @@ def format_report(report: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def format_suite_report(suite: dict[str, Any]) -> str:
+def format_model_api_suite(suite: dict[str, Any]) -> str:
     """Render several benchmark reports as one printable block."""
 
     reports = suite["reports"]
     blocks = []
     for report in reports:
         if report.get("ok", True):
-            blocks.append(format_report(report))
+            blocks.append(format_model_api_report(report))
             continue
         blocks.append(
             "\n".join(
                 [
-                    "Phase 3 Benchmark Report",
+                    "Model API Benchmark Report",
                     f"model: {report['model_name']}",
                     f"status: FAILED ({report['error_type']})",
                     f"error: {report['error']}",
@@ -478,30 +344,6 @@ def _get_attn_sites(model: ti.Model, layer_sites: list[Any]) -> list[Any]:
             raise RuntimeError(f"Could not find attention module under {layer_site.path}.")
         attn_sites.append(attn)
     return attn_sites
-
-
-def _make_inputs(
-    *,
-    batch_size: int,
-    seq_len: int,
-    vocab_size: int,
-    seed: int,
-    device: torch.device,
-) -> dict[str, torch.Tensor]:
-    generator = torch.Generator(device="cpu")
-    generator.manual_seed(seed)
-    input_ids = torch.randint(
-        low=0,
-        high=vocab_size,
-        size=(batch_size, seq_len),
-        generator=generator,
-        dtype=torch.long,
-    )
-    attention_mask = torch.ones((batch_size, seq_len), dtype=torch.long)
-    return {
-        "input_ids": input_ids.to(device=device),
-        "attention_mask": attention_mask.to(device=device),
-    }
 
 
 def _check_capture(
@@ -835,9 +677,7 @@ def _max_abs_diff(left: torch.Tensor, right: torch.Tensor) -> float:
 
 
 def _tolerance_for(tensor: torch.Tensor) -> float:
-    if tensor.dtype in (torch.float16, torch.bfloat16):
-        return 1e-2
-    return 1e-5
+    return comparison_tolerances(tensor, mode="same_impl")[0]
 
 
 def _get_module(model: nn.Module, path: str) -> nn.Module:
@@ -866,31 +706,11 @@ def _sweep_values(width: int) -> tuple[float, ...]:
 
 
 def _build_workload(
-    config: BenchmarkConfig,
+    config: ModelApiBenchmarkConfig,
     *,
     device: torch.device,
     dtype: torch.dtype,
 ) -> dict[str, Any]:
-    if config.model_name is None:
-        model = BenchmarkCausalLmModel(
-            vocab_size=config.vocab_size,
-            width=config.width,
-            n_layers=config.layers,
-            n_heads=config.n_heads,
-            max_positions=config.seq_len,
-        )
-        prepared = _prepare_model(model, device=device, dtype=dtype)
-        return {
-            "model": prepared,
-            "inputs": _make_inputs(
-                batch_size=config.batch_size,
-                seq_len=config.seq_len,
-                vocab_size=config.vocab_size,
-                seed=config.seed + 1,
-                device=device,
-            ),
-        }
-
     model, tokenizer = _load_hf_workload_model(config.model_name, device=device, dtype=dtype)
     prompts = _prompt_pool(config.batch_size)
     return {
@@ -943,10 +763,7 @@ def _load_hf_workload_model(
 
 
 def _prompt_pool(total: int) -> list[str]:
-    return [
-        f"Prompt {idx}: {_PROMPT_STEMS[idx % len(_PROMPT_STEMS)]}"
-        for idx in range(total)
-    ]
+    return [f"Prompt {idx}: {_PROMPT_STEMS[idx % len(_PROMPT_STEMS)]}" for idx in range(total)]
 
 
 def _tokenize_prompts(
@@ -987,19 +804,33 @@ def _config_value(config: Any, *names: str) -> Any | None:
     for name in names:
         if hasattr(config, name):
             return getattr(config, name)
+    text_config = _text_config(config)
+    if text_config is not None:
+        for name in names:
+            if hasattr(text_config, name):
+                return getattr(text_config, name)
+    return None
+
+
+def _text_config(config: Any) -> Any | None:
+    getter = getattr(config, "get_text_config", None)
+    if not callable(getter):
+        return None
+    for kwargs in ({"decoder": True}, {}):
+        try:
+            return getter(**kwargs)
+        except TypeError:
+            continue
     return None
 
 
 def _git_commit() -> str | None:
     try:
-        return (
-            subprocess.check_output(
-                ["git", "rev-parse", "HEAD"],
-                text=True,
-                stderr=subprocess.DEVNULL,
-            )
-            .strip()
-        )
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
     except Exception:
         return None
 

@@ -23,7 +23,7 @@ AutoConfig = transformers.AutoConfig
 AutoModelForCausalLM = transformers.AutoModelForCausalLM
 Gemma3Config = transformers.Gemma3Config
 Gemma3TextConfig = transformers.Gemma3TextConfig
-Qwen3_5TextConfig = transformers.Qwen3_5TextConfig
+Qwen3_5TextConfig = getattr(transformers, "Qwen3_5TextConfig", None)
 
 LLAMA31_MODEL_NAME = "meta-llama/Llama-3.1-8B-Instruct"
 GEMMA3_MODEL_NAME = "google/gemma-3-4b-it"
@@ -70,6 +70,8 @@ def _build_gemma3() -> tuple[torch.nn.Module, dict[str, Any]]:
 
 
 def _build_qwen35() -> tuple[torch.nn.Module, dict[str, Any]]:
+    if Qwen3_5TextConfig is None:
+        pytest.skip("transformers build does not expose Qwen3_5TextConfig.")
     config = Qwen3_5TextConfig(
         vocab_size=64,
         hidden_size=16,
@@ -91,7 +93,35 @@ def _build_qwen35() -> tuple[torch.nn.Module, dict[str, Any]]:
     return model, _tiny_inputs()
 
 
-@pytest.mark.parametrize("builder", [_build_llama31, _build_gemma3, _build_qwen35])
+_TRANSFORMER_BUILDERS = [
+    _build_llama31,
+    _build_gemma3,
+    *([] if Qwen3_5TextConfig is None else [_build_qwen35]),
+]
+_NAV_CASES = [
+    (_build_llama31, "model.layers.1.self_attn", "model.layers.1"),
+    (_build_gemma3, "model.language_model.layers.1.self_attn", "model.language_model.layers.1"),
+]
+_PATH_CASES_L1 = [
+    (_build_llama31, "model.layers.1.self_attn"),
+    (_build_gemma3, "model.language_model.layers.1.self_attn"),
+]
+_PATH_CASES_L0 = [
+    (_build_llama31, "model.layers.0.self_attn"),
+    (_build_gemma3, "model.language_model.layers.0.self_attn"),
+]
+_LAYER_CASES = [
+    (_build_llama31, "model.layers.0.self_attn"),
+    (_build_gemma3, "model.language_model.layers.0.self_attn"),
+]
+if Qwen3_5TextConfig is not None:
+    _NAV_CASES.append((_build_qwen35, "model.layers.1.self_attn", "model.layers.1"))
+    _PATH_CASES_L1.append((_build_qwen35, "model.layers.1.self_attn"))
+    _PATH_CASES_L0.append((_build_qwen35, "model.layers.0.self_attn"))
+    _LAYER_CASES.append((_build_qwen35, "model.layers.0.self_attn"))
+
+
+@pytest.mark.parametrize("builder", _TRANSFORMER_BUILDERS)
 def test_transformers_passthrough_matches_wrapped_model(
     builder: Callable[[], tuple[torch.nn.Module, dict[str, Any]]],
 ) -> None:
@@ -103,7 +133,8 @@ def test_transformers_passthrough_matches_wrapped_model(
         expected = wrapped(**inputs)
         actual = model(**inputs)
 
-    assert type(actual) is type(expected)
+    assert isinstance(actual, ti.Output)
+    assert type(actual._model_output) is type(expected)
     assert torch.allclose(actual.logits, expected.logits)
 
 
@@ -123,11 +154,7 @@ def test_transformers_model_loads_from_local_path(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(
     ("builder", "path", "layers_path"),
-    [
-        (_build_llama31, "model.layers.1.self_attn", "model.layers.1"),
-        (_build_gemma3, "model.language_model.layers.1.self_attn", "model.language_model.layers.1"),
-        (_build_qwen35, "model.layers.1.self_attn", "model.layers.1"),
-    ],
+    _NAV_CASES,
 )
 def test_transformers_navigation_and_get_match_manual_hook(
     builder: Callable[[], tuple[torch.nn.Module, dict[str, Any]]],
@@ -152,17 +179,14 @@ def test_transformers_navigation_and_get_match_manual_hook(
     proxy = get_proxy(model, path)
     output = model(**inputs, get=[proxy])
 
-    assert model.layers[1].path == layers_path
+    target_layer = model.layers[min(1, len(model.layers) - 1)]
+    assert target_layer.path == layers_path
     assert torch.allclose(output[proxy], captured["act"])
 
 
 @pytest.mark.parametrize(
     ("builder", "path"),
-    [
-        (_build_llama31, "model.layers.1.self_attn"),
-        (_build_gemma3, "model.language_model.layers.1.self_attn"),
-        (_build_qwen35, "model.layers.1.self_attn"),
-    ],
+    _PATH_CASES_L1,
 )
 def test_transformers_map_matches_manual_hook(
     builder: Callable[[], tuple[torch.nn.Module, dict[str, Any]]],
@@ -190,11 +214,7 @@ def test_transformers_map_matches_manual_hook(
 
 @pytest.mark.parametrize(
     ("builder", "layers_path"),
-    [
-        (_build_llama31, "model.layers.0.self_attn"),
-        (_build_gemma3, "model.language_model.layers.0.self_attn"),
-        (_build_qwen35, "model.layers.0.self_attn"),
-    ],
+    _LAYER_CASES,
 )
 def test_transformers_layers_shortcut_finds_requested_families(
     builder: Callable[[], tuple[torch.nn.Module, dict[str, Any]]],
@@ -202,11 +222,12 @@ def test_transformers_layers_shortcut_finds_requested_families(
 ) -> None:
     wrapped, _inputs = builder()
     model = ti.Model(wrapped, rename=ti.renames.llm)
+    site = ti.find(model.layers[0], "attn")
+    assert site is not None
+    assert site.path == layers_path
 
-    assert model.layers[0].self_attn.path == layers_path
 
-
-@pytest.mark.parametrize("builder", [_build_llama31, _build_gemma3, _build_qwen35])
+@pytest.mark.parametrize("builder", _TRANSFORMER_BUILDERS)
 def test_transformers_generate_matches_wrapped_model(
     builder: Callable[[], tuple[torch.nn.Module, dict[str, Any]]],
 ) -> None:
@@ -226,7 +247,9 @@ def test_transformers_generate_matches_wrapped_model(
         expected = cast(Any, wrapped).generate(**generate_kwargs)
         actual = model.generate(**generate_kwargs)
 
-    assert torch.equal(actual, expected)
+    assert isinstance(actual, ti.GenerateOutput)
+    assert torch.equal(actual.sequences, expected)
+    assert torch.equal(actual.generated_ids, expected[:, actual.prompt_length :])
 
 
 def test_transformers_generate_rejects_stop_at_last_get() -> None:
@@ -245,13 +268,31 @@ def test_transformers_generate_rejects_stop_at_last_get() -> None:
         _ = model.generate(**generate_kwargs, stop_at_last_get=True)
 
 
+def test_transformers_generate_get_capture_all_exposes_sequences_and_activations() -> None:
+    wrapped, inputs = _build_llama31()
+    model = ti.Model(wrapped)
+    site = get_proxy(model, "model.layers.0.self_attn")
+
+    generate_kwargs = {
+        "input_ids": inputs["input_ids"],
+        "attention_mask": inputs["attention_mask"],
+        "max_new_tokens": 2,
+        "do_sample": False,
+        "use_cache": False,
+    }
+
+    with torch.no_grad():
+        expected = cast(Any, wrapped).generate(**generate_kwargs)
+        actual = model.generate(**generate_kwargs, get=[site], capture="all")
+
+    assert isinstance(actual, ti.GenerateOutput)
+    assert torch.equal(actual.sequences, expected)
+    assert actual[site].shape[1] == expected.shape[-1]
+
+
 @pytest.mark.parametrize(
     ("builder", "path"),
-    [
-        (_build_llama31, "model.layers.0.self_attn"),
-        (_build_gemma3, "model.language_model.layers.0.self_attn"),
-        (_build_qwen35, "model.layers.0.self_attn"),
-    ],
+    _PATH_CASES_L0,
 )
 def test_transformers_generate_map_matches_manual_hook(
     builder: Callable[[], tuple[torch.nn.Module, dict[str, Any]]],
@@ -282,16 +323,13 @@ def test_transformers_generate_map_matches_manual_hook(
 
     actual = model.generate(**generate_kwargs, map={get_proxy(model, path): ti.zero()})
 
-    assert torch.equal(actual._model_output, expected)
+    assert isinstance(actual, ti.GenerateOutput)
+    assert torch.equal(actual.sequences, expected)
 
 
 @pytest.mark.parametrize(
     ("builder", "path"),
-    [
-        (_build_llama31, "model.layers.0.self_attn"),
-        (_build_gemma3, "model.language_model.layers.0.self_attn"),
-        (_build_qwen35, "model.layers.0.self_attn"),
-    ],
+    _PATH_CASES_L0,
 )
 def test_transformers_batch_fused_outputs_expose_logits(
     builder: Callable[[], tuple[torch.nn.Module, dict[str, Any]]],

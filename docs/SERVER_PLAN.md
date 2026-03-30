@@ -704,14 +704,14 @@ Rule: core tinyinterp files should not become polluted with scheduler logic.
 - `prefill` and `decode` APIs
 - narrow decode outputs
 
-### Phase 3: Continuous batching
+### Continuous batching
 
 - decode queue
 - microbatch scheduler
 - chunked prefill
 - queue metrics and admission control
 
-### Phase 4: Static decode optimization
+### Static decode optimization
 
 - `StaticCache`
 - shape bucketing

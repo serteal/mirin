@@ -30,7 +30,7 @@ LlamaConfig = transformers.LlamaConfig
 MistralConfig = transformers.MistralConfig
 OPTConfig = transformers.OPTConfig
 PhiConfig = transformers.PhiConfig
-Qwen3_5TextConfig = transformers.Qwen3_5TextConfig
+Qwen3_5TextConfig = getattr(transformers, "Qwen3_5TextConfig", None)
 StableLmConfig = transformers.StableLmConfig
 
 
@@ -64,7 +64,7 @@ def _generate_kwargs(model: torch.nn.Module) -> dict[str, Any]:
 
 
 def _family_specs() -> list[FamilySpec]:
-    return [
+    specs = [
         FamilySpec(
             name="llama",
             make_config=lambda: LlamaConfig(
@@ -220,27 +220,6 @@ def _family_specs() -> list[FamilySpec]:
             find_path="model.decoder.layers.0.self_attn",
         ),
         FamilySpec(
-            name="qwen35",
-            make_config=lambda: Qwen3_5TextConfig(
-                vocab_size=64,
-                hidden_size=16,
-                intermediate_size=32,
-                num_hidden_layers=2,
-                num_attention_heads=2,
-                num_key_value_heads=2,
-                max_position_embeddings=16,
-                bos_token_id=1,
-                eos_token_id=2,
-                pad_token_id=0,
-                use_cache=False,
-                attn_implementation="eager",
-                layer_types=["full_attention", "full_attention"],
-            ),
-            layers_path="model.layers.0",
-            find_pattern="self_attn",
-            find_path="model.layers.0.self_attn",
-        ),
-        FamilySpec(
             name="falcon",
             make_config=lambda: FalconConfig(
                 vocab_size=64,
@@ -279,6 +258,31 @@ def _family_specs() -> list[FamilySpec]:
             find_path="model.layers.0.self_attn",
         ),
     ]
+    if Qwen3_5TextConfig is not None:
+        specs.append(
+            FamilySpec(
+                name="qwen35",
+                make_config=lambda: Qwen3_5TextConfig(
+                    vocab_size=64,
+                    hidden_size=16,
+                    intermediate_size=32,
+                    num_hidden_layers=2,
+                    num_attention_heads=2,
+                    num_key_value_heads=2,
+                    max_position_embeddings=16,
+                    bos_token_id=1,
+                    eos_token_id=2,
+                    pad_token_id=0,
+                    use_cache=False,
+                    attn_implementation="eager",
+                    layer_types=["full_attention", "full_attention"],
+                ),
+                layers_path="model.layers.0",
+                find_pattern="self_attn",
+                find_path="model.layers.0.self_attn",
+            )
+        )
+    return specs
 
 
 FAMILY_SPECS = _family_specs()
@@ -337,4 +341,5 @@ def test_phase2_architectures_support_generate_map(spec: FamilySpec) -> None:
     with torch.no_grad():
         actual = model.generate(**generate_kwargs, map={site: ti.zero()})
 
-    assert torch.equal(actual._model_output, expected)
+    assert isinstance(actual, ti.GenerateOutput)
+    assert torch.equal(actual.sequences, expected)

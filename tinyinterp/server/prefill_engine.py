@@ -50,9 +50,7 @@ class PrefillEngine:
                 "collect_batch rejected by token budget: "
                 f"{batch_tokens} > {collector.token_budget}."
             )
-            raise MemoryError(
-                message
-            )
+            raise MemoryError(message)
         estimate = self._estimate_collection(collector, batch=batch)
         with self.server._scheduled(
             "collect_batch",
@@ -65,13 +63,11 @@ class PrefillEngine:
             )
             if not collector.use_cache:
                 kwargs.setdefault("use_cache", False)
-            with torch.inference_mode():
-                result = self.server.model(
-                    get=list(collector.plan.get_proxies),
-                    map=collector.plan.map_dict,
-                    stop_at_last_get=collector.stop_at_last_get,
-                    **filter_supported_kwargs(self.server.model.wrapped, kwargs),
-                )
+            result = self.server._execute_plan(
+                collector.plan,
+                kwargs=filter_supported_kwargs(self.server._model.wrapped, kwargs),
+                stop_at_last_get=collector.stop_at_last_get,
+            )
             plan_result = self.server._build_plan_result(
                 collector.plan,
                 result,
@@ -130,6 +126,8 @@ class PrefillEngine:
             return []
         if input_ids.ndim != 2:
             raise ValueError("prefill_many() expects [batch, seq] input_ids.")
+        if int(input_ids.shape[1]) < 1:
+            raise ValueError("prefill_many() expects at least one prompt token.")
         if len(sessions) != int(input_ids.shape[0]):
             raise ValueError("prefill_many() expects one session per batch row.")
 
@@ -262,14 +260,16 @@ class PrefillEngine:
             else:
                 for start in range(0, input_ids.shape[1], chunk_size):
                     end = min(start + chunk_size, input_ids.shape[1])
-                    raw_result, result = self._execute_hf_chunk(
+                    raw_result, chunk_result = self._execute_hf_chunk(
                         session,
                         input_ids=input_ids[:, start:end],
                         attention_mask=attention_mask[:, :end],
                         cache=cache,
                     )
+                    result = _merge_chunk_result(result, chunk_result)
                     cache = session.cache
-            assert result is not None
+            if result is None:
+                raise RuntimeError("prefill() did not produce a result.")
             session.input_ids = None
             session.attention_mask = None
             return self.decode_engine.register_prefill_result(
@@ -279,19 +279,17 @@ class PrefillEngine:
                 attention_mask=attention_mask,
             )
 
-        with torch.inference_mode():
-            model_result = self.server.model(
-                get=list(session.plan.get_proxies),
-                map=session.plan.map_dict,
-                **filter_supported_kwargs(
-                    self.server.model.wrapped,
-                    {
-                        "input_ids": input_ids,
-                        "attention_mask": attention_mask,
-                        **session.extra_kwargs,
-                    },
-                ),
-            )
+        model_result = self.server._execute_plan(
+            session.plan,
+            kwargs=filter_supported_kwargs(
+                self.server._model.wrapped,
+                {
+                    "input_ids": input_ids,
+                    "attention_mask": attention_mask,
+                    **session.extra_kwargs,
+                },
+            ),
+        )
         result = self.server._build_plan_result(
             session.plan,
             model_result,
@@ -323,12 +321,7 @@ class PrefillEngine:
             cache=None,
             extra_kwargs=first.extra_kwargs,
         )
-        with torch.inference_mode():
-            result = self.server.model(
-                get=list(first.plan.get_proxies),
-                map=first.plan.map_dict,
-                **prepared,
-            )
+        result = self.server._execute_plan(first.plan, kwargs=prepared)
         logits = split_batch_tensor(extract_last_token_logits(result), len(sessions))
         activations = split_activation_dict(
             self.server._extract_activations(first.plan, result),
@@ -414,12 +407,7 @@ class PrefillEngine:
             cache=cache,
             extra_kwargs=session.extra_kwargs,
         )
-        with torch.inference_mode():
-            result = self.server.model(
-                get=list(session.plan.get_proxies),
-                map=session.plan.map_dict,
-                **prepared,
-            )
+        result = self.server._execute_plan(session.plan, kwargs=prepared)
         if isinstance(result, Output):
             model_output = result._model_output
         else:
@@ -447,9 +435,9 @@ class PrefillEngine:
         )
         return estimate_admission(
             queue="collect_batch",
-            wrapped=self.server.model.wrapped,
+            wrapped=self.server._model.wrapped,
             plan=collector.plan,
-            dtype=model_dtype(self.server.model.wrapped),
+            dtype=model_dtype(self.server._model.wrapped),
             batch_size=batch_size_from_mapping(batch),
             prompt_tokens=prompt_tokens_from_mapping(batch),
             projected_decode_tokens=0,
@@ -498,3 +486,26 @@ def _apply_reducer(
             reduced = reduced[:, -1]
         output[path] = reduced
     return output
+
+
+def _merge_chunk_result(current: PlanResult | None, update: PlanResult) -> PlanResult:
+    if current is None:
+        return update
+    activations = dict(current.activations)
+    for path, value in update.activations.items():
+        prev = activations.get(path)
+        if (
+            isinstance(prev, torch.Tensor)
+            and isinstance(value, torch.Tensor)
+            and prev.ndim >= 2
+            and value.ndim >= 2
+            and prev.shape[0] == value.shape[0]
+        ):
+            activations[path] = torch.cat([prev, value], dim=1)
+        else:
+            activations[path] = value
+    current.activations = activations
+    current.logits = update.logits
+    current.completed_forward = update.completed_forward
+    current.metadata.update(update.metadata)
+    return current

@@ -1,28 +1,23 @@
-"""CLI entrypoint for the tinyinterp Phase 3 benchmark harness."""
+"""CLI entrypoint for the tinyinterp Model API benchmark harness."""
 
 from __future__ import annotations
 
 import argparse
 
-from .phase3 import (
+from .model_api import (
     DEFAULT_MODEL_NAMES,
-    BenchmarkConfig,
-    format_suite_report,
-    run_phase3_suite,
+    ModelApiBenchmarkConfig,
+    format_model_api_suite,
+    run_model_api_suite,
 )
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model-name", action="append")
-    parser.add_argument("--synthetic", action="store_true")
     parser.add_argument("--device", default="auto")
     parser.add_argument("--dtype", default="bfloat16", choices=("float32", "float16", "bfloat16"))
     parser.add_argument("--seed", type=int, default=7)
-    parser.add_argument("--layers", type=int, default=12)
-    parser.add_argument("--width", type=int, default=768)
-    parser.add_argument("--n-heads", type=int, default=12)
-    parser.add_argument("--vocab-size", type=int, default=4096)
     parser.add_argument("--seq-len", type=int, default=256)
     parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--micro-warmup", type=int, default=5)
@@ -38,17 +33,13 @@ def main() -> int:
     parser.add_argument("--json-output")
     args = parser.parse_args()
 
-    model_names = [None] if args.synthetic else (args.model_name or list(DEFAULT_MODEL_NAMES))
+    model_names = args.model_name or list(DEFAULT_MODEL_NAMES)
     configs = [
-        BenchmarkConfig(
+        ModelApiBenchmarkConfig(
             model_name=model_name,
             device=args.device,
             dtype=args.dtype,
             seed=args.seed,
-            layers=args.layers,
-            width=args.width,
-            n_heads=args.n_heads,
-            vocab_size=args.vocab_size,
             seq_len=args.seq_len,
             batch_size=args.batch_size,
             micro_warmup=args.micro_warmup,
@@ -60,8 +51,8 @@ def main() -> int:
         )
         for model_name in model_names
     ]
-    suite = run_phase3_suite(configs, json_output=args.json_output)
-    print(format_suite_report(suite))
+    suite = run_model_api_suite(configs, json_output=args.json_output)
+    print(format_model_api_suite(suite))
     return 0
 
 

@@ -1,0 +1,54 @@
+[
+  {
+    "model_name": "google/gemma-2-2b-it",
+    "local_generate_ms": [
+      130.1584467291832,
+      137.3024731874466,
+      128.46840173006058
+    ],
+    "remote_generate_ms": [
+      129.06036525964737,
+      130.16816973686218,
+      128.43161076307297
+    ],
+    "remote_generate_object_only_ms": 127.1248459815979,
+    "remote_generate_resolve_sequences_ms": 1.0266229510307312,
+    "remote_generate_cpu_request_ms": [
+      133.55380296707153,
+      132.33204185962677,
+      129.71626222133636
+    ],
+    "remote_cmd_medians_ms": {
+      "GENERATE_MANY": 126.78885459899902,
+      "resolve:GENERATE_MANY": 126.0828748345375,
+      "resolve:FETCH_VALUE": 0.1929253339767456
+    },
+    "server_generate_many_last_ms": 128.9312094449997
+  },
+  {
+    "model_name": "meta-llama/Llama-3.1-8B-Instruct",
+    "local_generate_ms": [
+      112.68388479948044,
+      110.59220135211945,
+      110.8677014708519
+    ],
+    "remote_generate_ms": [
+      118.17615479230881,
+      111.237533390522,
+      110.93664914369583
+    ],
+    "remote_generate_object_only_ms": 111.83741688728333,
+    "remote_generate_resolve_sequences_ms": 0.24955719709396362,
+    "remote_generate_cpu_request_ms": [
+      110.5564534664154,
+      110.51254719495773,
+      111.41292005777359
+    ],
+    "remote_cmd_medians_ms": {
+      "GENERATE_MANY": 111.56001687049866,
+      "resolve:GENERATE_MANY": 111.2080067396164,
+      "resolve:FETCH_VALUE": 0.16953051090240479
+    },
+    "server_generate_many_last_ms": 110.90300232172012
+  }
+]
