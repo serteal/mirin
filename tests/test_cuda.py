@@ -14,7 +14,7 @@ import torch
 import tinyinterp as ti
 
 from .helpers import FakeDecoderModel, FakeTokenizer, get_proxy
-from .test_server import _build_llama31
+from .test_server_transformers import _build_llama31
 
 pytestmark = pytest.mark.cuda
 

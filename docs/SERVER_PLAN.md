@@ -97,17 +97,15 @@ The performance server is allowed to say:
 
 That specialization is not a betrayal of the tinygrad philosophy. It is complexity quarantine.
 
-### 3.3 Two server faces
+### 3.3 One public server face
 
-The server package should expose two distinct faces:
+The repo should expose one public serving/runtime object:
 
-1. `DebugServer`
-   Thin remote mirror of `ti.Model` for tests, notebooks, and remote control
-
-2. `InferenceServer`
+1. `Server`
    High-performance engine for CausalLM serving and dataset collection
 
-The existing ZMQ mirror fits `DebugServer`. It should not be treated as the final serving architecture.
+Remote `ti.Model("unix://...")` is the thin mirror used by tests, notebooks, and deployed clients.
+It should not grow into a second public server class.
 
 ---
 
@@ -164,7 +162,7 @@ This mode is the tinyinterp differentiator. It must not destroy the serving engi
 The API should be explicit about state and scheduling.
 
 ```python
-server = ti.InferenceServer(
+server = ti.Server(
     "meta-llama/Llama-3.2-1B",
     device="cuda",
     attn_backend="flash_attention_2",

@@ -7,13 +7,12 @@ from .counters import Counters
 from .maps import add, map_head, noise, replace, scale, slice_head, zero
 from .model import Model
 from .output import GenerateOutput, Output
-from .server import InferenceServer, Server
+from .server import Server
 from .utils import children, find, find_all
 
 __all__ = [
     "Counters",
     "GenerateOutput",
-    "InferenceServer",
     "Model",
     "Output",
     "Server",

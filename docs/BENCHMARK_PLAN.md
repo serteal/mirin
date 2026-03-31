@@ -363,7 +363,7 @@ Every performance-sensitive change should run:
 3. cross-library local compare on CUDA
 4. any affected failure-mode stress cases
 
-Before claiming a major speedup, run the real-model matrix on the main GPU box and save results under `benchmarks/results/`.
+Before claiming a major speedup, run the real-model matrix on the main GPU box and save the JSON somewhere outside the repo, for example `/tmp/tinyinterp-matrix.json`.
 
 ## 11. Immediate Gaps
 

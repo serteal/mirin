@@ -15,13 +15,11 @@ import torch
 import tinyinterp as ti
 
 from .model_api import _environment_report, _measure_case, _resolve_device, _resolve_dtype
-from .runtime_internals import (
+from .runtime_internals_shared import (
     _clear_cuda,
-    _hf_generate,
     _load_model,
     _make_dataset,
     _manual_hook_once,
-    _model_collect_loop,
     _open_remote_model,
     _pad_batch_sequences,
     _pad_token_id,
@@ -30,6 +28,7 @@ from .runtime_internals import (
     _site_path,
     _vocab_size,
 )
+from .runtime_internals_workloads import _hf_generate, _model_collect_loop
 from .support import remote_support_map
 from .tolerances import compare_tensors
 

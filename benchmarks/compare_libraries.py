@@ -275,41 +275,6 @@ def format_compare_report(report: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _load_workload(
-    config: CompareConfig,
-    *,
-    device: torch.device,
-    dtype: torch.dtype,
-) -> dict[str, Any]:
-    """Load all four model variants for a cross-library benchmark."""
-
-    transformers = _import_transformers()
-    tokenizer = transformers.AutoTokenizer.from_pretrained(config.model_name)
-
-    raw_model = _load_hf_model(config.model_name, device=device, dtype=dtype)
-    tiny_model = ti.Model(raw_model)
-
-    tl_source = _load_hf_model(config.model_name, device=device, dtype=dtype)
-    lens_model = _load_transformerlens_model(
-        config.model_name,
-        hf_model=tl_source,
-        tokenizer=tokenizer,
-        device=device,
-        dtype=dtype,
-    )
-    del tl_source
-    _release_models(device)
-
-    nn_model = _load_nnterp_model(config.model_name, device=device, dtype=dtype)
-
-    return {
-        "raw_model": raw_model,
-        "tiny_model": tiny_model,
-        "lens_model": lens_model,
-        "nn_model": nn_model,
-    }
-
-
 def _prepare_compare_inputs(
     config: CompareConfig,
     *,

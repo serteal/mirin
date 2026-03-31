@@ -229,8 +229,8 @@ Assessment:
 
 Source artifacts:
 
-- `benchmarks/results/server_runtime-after-steps.json`
-- `benchmarks/results/server_runtime-smoke-after-step3.json`
+- local runtime benchmark JSON saved from `python -m benchmarks.run_runtime_internals`
+- local matrix JSON saved from `python -m benchmarks.run_matrix`
 
 The exact numbers vary by model and benchmark revision, but the pattern is consistent.
 

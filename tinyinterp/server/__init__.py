@@ -6,12 +6,9 @@ from .plans import CompiledPlan, MapSpec, OutputPolicy
 from .results import PlanResult
 from .sessions import SamplingConfig, Session
 
-InferenceServer = Server
-
 __all__ = [
     "Collector",
     "CompiledPlan",
-    "InferenceServer",
     "MapSpec",
     "OutputPolicy",
     "PlanResult",

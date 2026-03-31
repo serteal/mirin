@@ -530,7 +530,7 @@ When the user does `ti.Model(my_already_loaded_model)`, we DON'T import transfor
 from .model import Model
 from .maps import replace, add, scale, zero, noise
 from .batch import batch
-from .server import Server, InferenceServer
+from .server import Server
 ```
 
 Current split:

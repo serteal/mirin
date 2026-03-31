@@ -58,7 +58,7 @@ Save structured results:
 uv run python -m benchmarks.run_matrix \
   --device cuda \
   --dtype bfloat16 \
-  --json-output benchmarks/results/matrix.json
+  --json-output /tmp/tinyinterp-matrix.json
 ```
 
 Run one model only:
@@ -97,7 +97,7 @@ Measures the same semantic site across raw Hugging Face, `tinyinterp`, Transform
 ```bash
 uv run python -m benchmarks.run_compare_libraries \
   --model meta-llama/Llama-3.1-8B-Instruct \
-  --json-output benchmarks/results/compare-libraries-llama31-8b.json
+  --json-output /tmp/tinyinterp-compare-libraries.json
 ```
 
 ### Local vs Remote API Compare
@@ -140,7 +140,7 @@ Save structured results:
 
 ```bash
 uv run python -m benchmarks.run_compare_streaming_libraries \
-  --json-output benchmarks/results/compare-streaming-libraries-llama31-8b.json
+  --json-output /tmp/tinyinterp-compare-streaming.json
 ```
 
 ## CUDA E2E Test

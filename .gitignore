@@ -14,3 +14,4 @@ external/
 *.md
 !docs/*.md
 !README.md
+benchmarks/results/
