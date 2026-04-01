@@ -1,4 +1,4 @@
-"""Aggregate counters for tinyinterp calls."""
+"""Aggregate counters for mirin calls."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ _COUNTER_FIELDS = (
 
 
 class _Counters:
-    """Track cumulative tinyinterp work across calls."""
+    """Track cumulative mirin work across calls."""
 
     calls: int
     forward_passes: int
@@ -58,7 +58,7 @@ class _Counters:
 
         with self._lock:
             lines = [
-                "tinyinterp counters:",
+                "mirin counters:",
                 f"  calls:                 {self.calls}",
                 f"  forward_passes:        {self.forward_passes}",
                 f"  total_time:            {self.total_time_ns / 1e6:.3f}ms",

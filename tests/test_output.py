@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import torch
 
-import tinyinterp as ti
-from tinyinterp.output import _lengths_from_field, output_from_path_activations
+import mirin as ti
+from mirin.output import _lengths_from_field, output_from_path_activations
 
 from .helpers import FakeDecoderModel
 

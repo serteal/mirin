@@ -25,6 +25,6 @@ repos:
         types_or: [python, pyi]
       - id: mypy
         name: mypy
-        entry: uv run mypy tinyinterp
+        entry: uv run mypy mirin
         language: system
         pass_filenames: false

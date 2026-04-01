@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-import tinyinterp as ti
-from tinyinterp.executors import _map_cache_key
+import mirin as ti
+from mirin.executors import _map_cache_key
 
 from .helpers import FakeDecoderModel
 
@@ -18,7 +18,7 @@ def test_local_executor_layers_rejects_non_modulelist_proxy(
     def bad_wrap_proxy(*_args: object, **_kwargs: object) -> object:
         return object()
 
-    monkeypatch.setattr("tinyinterp.model._wrap_proxy", bad_wrap_proxy)
+    monkeypatch.setattr("mirin.model._wrap_proxy", bad_wrap_proxy)
     model._layers_proxy = None
 
     with pytest.raises(TypeError, match="ModuleList proxy"):

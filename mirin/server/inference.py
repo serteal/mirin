@@ -79,7 +79,7 @@ def _output_from_plan_result(result: PlanResult) -> Output:
 
 
 class _RuntimeCore:
-    """Shared lowered runtime used by local and deployed tinyinterp execution."""
+    """Shared lowered runtime used by local and deployed mirin execution."""
 
     def __init__(
         self,
@@ -166,7 +166,7 @@ class _RuntimeCore:
             )
         return self._budget
 
-    def serve(self, sock_path: str = "/tmp/tinyinterp.sock") -> None:
+    def serve(self, sock_path: str = "/tmp/mirin.sock") -> None:
         """Start a persistent server on a Unix socket. Blocks forever."""
         from .remote import serve as _serve
 
@@ -1625,7 +1625,7 @@ def _batch_size_from_mapping(batch: Mapping[str, Any]) -> int:
 
 
 class Server:
-    """Deployment wrapper around the shared lowered tinyinterp runtime."""
+    """Deployment wrapper around the shared lowered mirin runtime."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         object.__setattr__(self, "_runtime", _RuntimeCore(*args, **kwargs))

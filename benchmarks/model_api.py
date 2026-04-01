@@ -1,4 +1,4 @@
-"""Model API benchmarking harness for tinyinterp."""
+"""Model API benchmarking harness for mirin."""
 
 from __future__ import annotations
 
@@ -16,9 +16,9 @@ from typing import Any
 import torch
 import torch.nn as nn
 
-import tinyinterp as ti
-from tinyinterp.hooks import _extract, _replace
-from tinyinterp.output import Output
+import mirin as ti
+from mirin.hooks import _extract, _replace
+from mirin.output import Output
 
 from .tolerances import comparison_tolerances
 

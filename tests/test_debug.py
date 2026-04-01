@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 import torch
 
-from tinyinterp.debug import (
+from mirin.debug import (
     _format_bytes,
     log_call_start,
     log_hook_event,

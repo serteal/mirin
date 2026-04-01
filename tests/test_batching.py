@@ -1,12 +1,12 @@
-"""Batching tests for tinyinterp."""
+"""Batching tests for mirin."""
 
 from __future__ import annotations
 
 import pytest
 import torch
 
-import tinyinterp as ti
-from tinyinterp.batch import _stack_values
+import mirin as ti
+from mirin.batch import _stack_values
 
 from .helpers import FakeDecoderModel
 

@@ -1,4 +1,4 @@
-"""Opt-in batching context for repeated tinyinterp calls."""
+"""Opt-in batching context for repeated mirin calls."""
 
 from __future__ import annotations
 

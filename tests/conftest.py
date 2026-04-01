@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-import tinyinterp as ti
+import mirin as ti
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
@@ -39,7 +39,7 @@ def _reset_counters_and_cleanup_sockets() -> None:
 
 
 def _cleanup_test_sockets() -> None:
-    for path in Path("/tmp").glob("tinyinterp_test_*.sock"):
+    for path in Path("/tmp").glob("mirin_test_*.sock"):
         try:
             path.unlink()
         except FileNotFoundError:

@@ -1,1 +1,1 @@
-"""Benchmark helpers for tinyinterp."""
+"""Benchmark helpers for mirin."""

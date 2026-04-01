@@ -101,7 +101,7 @@ def compile_plan(
 
 
 def resolve_site(model: Model, site: SiteLike) -> _ModuleProxy:
-    """Resolve a dotted path or validate a local tinyinterp proxy."""
+    """Resolve a dotted path or validate a local mirin proxy."""
 
     if isinstance(site, _ModuleProxy):
         return model._validate_proxy(site)
@@ -196,7 +196,7 @@ def _encode_map_fn(path: str, fn: Any) -> MapSpec:
         return MapSpec(path=path, op="scale", value=fn.factor)
     if isinstance(fn, maps_mod._Replace):
         return MapSpec(path=path, op="replace", value=fn.value)
-    raise TypeError("tinyinterp Server only supports built-in map ops: zero, add, scale, replace.")
+    raise TypeError("mirin Server only supports built-in map ops: zero, add, scale, replace.")
 
 
 def _fingerprint_value(value: Any) -> Any:

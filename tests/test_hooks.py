@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from tinyinterp.hooks import _replace
+from mirin.hooks import _replace
 
 
 def test_replace_rejects_unknown_output_structures() -> None:

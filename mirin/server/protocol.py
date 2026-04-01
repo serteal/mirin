@@ -1,4 +1,4 @@
-"""Binary protocol helpers for tinyinterp remote execution."""
+"""Binary protocol helpers for mirin remote execution."""
 
 from __future__ import annotations
 

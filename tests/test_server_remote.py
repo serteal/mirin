@@ -10,7 +10,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-import tinyinterp as ti
+import mirin as ti
 
 from .helpers import (
     FakeDecoderModel,
@@ -51,7 +51,7 @@ def test_remote_model_call_matches_local(factory: Callable[[], nn.Module]) -> No
     local_site = local_model.layers[0]
     expected = local_model(_input_ids(), get=[local_site])
 
-    sock = "/tmp/tinyinterp_test_call.sock"
+    sock = "/tmp/mirin_test_call.sock"
     server, _ = _start_server(lambda: _seeded_model(factory), sock)
     try:
         remote = ti.Model(f"unix://{sock}")
@@ -68,7 +68,7 @@ def test_remote_model_call_matches_local(factory: Callable[[], nn.Module]) -> No
 
 
 def test_remote_capabilities_report_protocol_and_grad_support() -> None:
-    sock = "/tmp/tinyinterp_test_caps.sock"
+    sock = "/tmp/mirin_test_caps.sock"
     server, _ = _start_server(FakeDecoderModel, sock)
     try:
         remote = ti.Model(f"unix://{sock}")
@@ -90,7 +90,7 @@ def test_remote_model_call_with_map(factory: Callable[[], nn.Module]) -> None:
     assert local_site is not None
     expected = local_model(_input_ids(), map={local_site: ti.zero()}).logits
 
-    sock = "/tmp/tinyinterp_test_map.sock"
+    sock = "/tmp/mirin_test_map.sock"
     server, _ = _start_server(lambda: _seeded_model(factory), sock)
     try:
         remote = ti.Model(f"unix://{sock}")
@@ -107,7 +107,7 @@ def test_remote_model_call_with_map(factory: Callable[[], nn.Module]) -> None:
 def test_remote_model_call_many_prompts() -> None:
     """ti.Model(unix://...) accepts prompt lists."""
 
-    sock = "/tmp/tinyinterp_test_many.sock"
+    sock = "/tmp/mirin_test_many.sock"
     server, _ = _start_server(FakeDecoderModel, sock)
     try:
         remote = ti.Model(f"unix://{sock}")
@@ -130,7 +130,7 @@ def test_remote_model_collect_matches_local() -> None:
     local_site = local_model.layers[0]
     expected = local_model.collect(["hello", "world"], get=[local_site])
 
-    sock = "/tmp/tinyinterp_test_collect.sock"
+    sock = "/tmp/mirin_test_collect.sock"
     server, _ = _start_server(lambda: _seeded_model(FakeDecoderModel), sock)
     try:
         remote = ti.Model(f"unix://{sock}")
@@ -150,7 +150,7 @@ def test_remote_model_collect_matches_local() -> None:
 def test_remote_model_generate_returns_generate_output() -> None:
     """ti.Model(unix://...).generate(input_ids=...) returns GenerateOutput."""
 
-    sock = "/tmp/tinyinterp_test_gen.sock"
+    sock = "/tmp/mirin_test_gen.sock"
     server, _ = _start_server(FakeDecoderModel, sock)
     try:
         remote = ti.Model(f"unix://{sock}")
@@ -167,7 +167,7 @@ def test_remote_model_generate_returns_generate_output() -> None:
 def test_remote_model_generate_many_prompts() -> None:
     """ti.Model(unix://...).generate(prompts, ...) accepts prompt lists."""
 
-    sock = "/tmp/tinyinterp_test_gen_many.sock"
+    sock = "/tmp/mirin_test_gen_many.sock"
     server, _ = _start_server(FakeDecoderModel, sock)
     try:
         remote = ti.Model(f"unix://{sock}")
@@ -181,7 +181,7 @@ def test_remote_model_generate_many_prompts() -> None:
 
 
 def test_remote_empty_request_list_is_rejected_cleanly(tmp_path: Path) -> None:
-    sock = str(tmp_path / "tinyinterp_test_empty_requests.sock")
+    sock = str(tmp_path / "mirin_test_empty_requests.sock")
     server, _ = _start_server(FakeDecoderModel, sock)
     try:
         remote = ti.Model(f"unix://{sock}")
@@ -198,7 +198,7 @@ def test_remote_empty_request_list_is_rejected_cleanly(tmp_path: Path) -> None:
 
 
 def test_remote_generate_max_new_tokens_zero_returns_prompt_only(tmp_path: Path) -> None:
-    sock = str(tmp_path / "tinyinterp_test_zero_generate.sock")
+    sock = str(tmp_path / "mirin_test_zero_generate.sock")
     server, _ = _start_server(FakeDecoderModel, sock)
     try:
         remote = ti.Model(f"unix://{sock}")
@@ -214,7 +214,7 @@ def test_remote_generate_max_new_tokens_zero_returns_prompt_only(tmp_path: Path)
 
 
 def test_remote_generate_forwards_sampling_kwargs_to_wrapped_model(tmp_path: Path) -> None:
-    sock = str(tmp_path / "tinyinterp_test_sampling_generate.sock")
+    sock = str(tmp_path / "mirin_test_sampling_generate.sock")
     wrapped = SamplingGenerateModel()
     server, _ = _start_server(lambda: wrapped, sock)
     try:
@@ -245,7 +245,7 @@ def test_remote_model_generate_get_matches_local_capture_all() -> None:
     local_site = local.layers[0]
     expected = local.generate("hello", max_new_tokens=2, do_sample=False, get=[local_site])
 
-    sock = "/tmp/tinyinterp_test_gen_get.sock"
+    sock = "/tmp/mirin_test_gen_get.sock"
     server, _ = _start_server(lambda: _seeded_model(FakeDecoderModel), sock)
     try:
         remote = ti.Model(f"unix://{sock}")
@@ -262,7 +262,7 @@ def test_remote_model_generate_get_matches_local_capture_all() -> None:
 
 
 def test_remote_model_generate_get_generated_only_trims_activations() -> None:
-    sock = "/tmp/tinyinterp_test_gen_get_generated.sock"
+    sock = "/tmp/mirin_test_gen_get_generated.sock"
     server, _ = _start_server(FakeDecoderModel, sock)
     try:
         remote = ti.Model(f"unix://{sock}")
@@ -296,7 +296,7 @@ def test_remote_model_call_request_forms_match_local(
     local_site = local.layers[0]
     expected = local(**filter_forward_inputs(local.wrapped, expected_inputs), get=[local_site])
 
-    sock = "/tmp/tinyinterp_test_remote_call_contract.sock"
+    sock = "/tmp/mirin_test_remote_call_contract.sock"
     server, _ = _start_server(lambda: _seeded_model(FakeDecoderModel), sock)
     try:
         remote = ti.Model(f"unix://{sock}")
@@ -328,7 +328,7 @@ def test_remote_model_call_request_forms_with_map_match_local(
         map={local_site: ti.zero()},
     )
 
-    sock = "/tmp/tinyinterp_test_remote_call_map_contract.sock"
+    sock = "/tmp/mirin_test_remote_call_map_contract.sock"
     server, _ = _start_server(lambda: _seeded_model(FakeDecoderModel), sock)
     try:
         remote = ti.Model(f"unix://{sock}")
@@ -359,7 +359,7 @@ def test_remote_model_call_request_forms_stop_at_last_get_match_local(
         stop_at_last_get=True,
     )
 
-    sock = "/tmp/tinyinterp_test_remote_call_stop_contract.sock"
+    sock = "/tmp/mirin_test_remote_call_stop_contract.sock"
     server, _ = _start_server(lambda: _seeded_model(FakeDecoderModel), sock)
     try:
         remote = ti.Model(f"unix://{sock}")
@@ -385,7 +385,7 @@ def test_remote_model_generate_request_forms_match_local(
     local = ti.Model(_seeded_model(FakeDecoderModel), tokenizer=FakeTokenizer())
     expected = local.generate(**expected_inputs, max_new_tokens=2, do_sample=False)
 
-    sock = "/tmp/tinyinterp_test_remote_generate_contract.sock"
+    sock = "/tmp/mirin_test_remote_generate_contract.sock"
     server, _ = _start_server(lambda: _seeded_model(FakeDecoderModel), sock)
     try:
         remote = ti.Model(f"unix://{sock}")
@@ -417,7 +417,7 @@ def test_remote_model_generate_request_forms_with_map_match_local(
         map={local_site: ti.zero()},
     )
 
-    sock = "/tmp/tinyinterp_test_remote_generate_map_contract.sock"
+    sock = "/tmp/mirin_test_remote_generate_map_contract.sock"
     server, _ = _start_server(lambda: _seeded_model(FakeDecoderModel), sock)
     try:
         remote = ti.Model(f"unix://{sock}")
@@ -449,7 +449,7 @@ def test_remote_model_collect_request_forms_match_local(
     local_site = local.layers[0]
     expected = local.collect(expected_inputs, get=[local_site])[0]
 
-    sock = "/tmp/tinyinterp_test_remote_collect_contract.sock"
+    sock = "/tmp/mirin_test_remote_collect_contract.sock"
     server, _ = _start_server(lambda: _seeded_model(FakeDecoderModel), sock)
     try:
         remote = ti.Model(f"unix://{sock}")
@@ -480,7 +480,7 @@ def test_remote_model_collect_request_forms_with_map_match_local(
         stop_at_last_get=False,
     )[0]
 
-    sock = "/tmp/tinyinterp_test_remote_collect_map_contract.sock"
+    sock = "/tmp/mirin_test_remote_collect_map_contract.sock"
     server, _ = _start_server(lambda: _seeded_model(FakeDecoderModel), sock)
     try:
         remote = ti.Model(f"unix://{sock}")
@@ -499,7 +499,7 @@ def test_remote_model_collect_request_forms_with_map_match_local(
 
 
 def test_remote_model_collect_map_rejects_fast_path_default() -> None:
-    sock = "/tmp/tinyinterp_test_remote_collect_map_error.sock"
+    sock = "/tmp/mirin_test_remote_collect_map_error.sock"
     server, _ = _start_server(FakeDecoderModel, sock)
     try:
         remote = ti.Model(f"unix://{sock}")
@@ -532,7 +532,7 @@ def test_remote_model_generate_request_forms_with_capture_match_local(
         capture=capture,
     )
 
-    sock = "/tmp/tinyinterp_test_remote_generate_capture_contract.sock"
+    sock = "/tmp/mirin_test_remote_generate_capture_contract.sock"
     server, _ = _start_server(lambda: _seeded_model(FakeDecoderModel), sock)
     try:
         remote = ti.Model(f"unix://{sock}")
@@ -558,7 +558,7 @@ def test_remote_model_generate_request_list_contracts_preserve_rows() -> None:
     requests = ["hello", {"text": "world"}, [{"role": "user", "content": "tiny"}]]
     expected = [local.generate(request, max_new_tokens=2, do_sample=False) for request in requests]
 
-    sock = "/tmp/tinyinterp_test_remote_generate_list_contract.sock"
+    sock = "/tmp/mirin_test_remote_generate_list_contract.sock"
     server, _ = _start_server(lambda: _seeded_model(FakeDecoderModel), sock)
     try:
         remote = ti.Model(f"unix://{sock}")
@@ -590,7 +590,7 @@ def test_remote_model_generate_request_list_with_capture_preserves_rows() -> Non
         for request in requests
     ]
 
-    sock = "/tmp/tinyinterp_test_remote_generate_list_capture_contract.sock"
+    sock = "/tmp/mirin_test_remote_generate_list_capture_contract.sock"
     server, _ = _start_server(lambda: _seeded_model(FakeDecoderModel), sock)
     try:
         remote = ti.Model(f"unix://{sock}")
@@ -618,7 +618,7 @@ def test_remote_model_generate_request_list_with_capture_preserves_rows() -> Non
 def test_remote_model_proxy_navigation() -> None:
     """ti.Model(unix://...) supports nested proxy navigation and ti.find()."""
 
-    sock = "/tmp/tinyinterp_test_nav.sock"
+    sock = "/tmp/mirin_test_nav.sock"
     server, _ = _start_server(FakeDecoderModel, sock)
     try:
         remote = ti.Model(f"unix://{sock}")
@@ -638,7 +638,7 @@ def test_remote_model_stop_at_last_get_matches_local() -> None:
     local_site = local_model.layers[0]
     expected = local_model(input_ids=_input_ids(), get=[local_site], stop_at_last_get=True)
 
-    sock = "/tmp/tinyinterp_test_stop.sock"
+    sock = "/tmp/mirin_test_stop.sock"
     server, _ = _start_server(lambda: _seeded_model(FakeDecoderModel), sock)
     try:
         remote = ti.Model(f"unix://{sock}")
@@ -653,7 +653,7 @@ def test_remote_model_stop_at_last_get_matches_local() -> None:
 
 
 def test_remote_outputs_fetch_values_lazily() -> None:
-    sock = "/tmp/tinyinterp_test_lazy.sock"
+    sock = "/tmp/mirin_test_lazy.sock"
     server, _ = _start_server(FakeDecoderModel, sock)
     try:
         remote = ti.Model(f"unix://{sock}")
@@ -671,7 +671,7 @@ def test_remote_outputs_fetch_values_lazily() -> None:
 
 
 def test_remote_close_releases_unresolved_values() -> None:
-    sock = "/tmp/tinyinterp_test_release.sock"
+    sock = "/tmp/mirin_test_release.sock"
     server, _ = _start_server(FakeDecoderModel, sock)
     try:
         remote = ti.Model(f"unix://{sock}")
@@ -688,7 +688,7 @@ def test_remote_close_releases_unresolved_values() -> None:
         _stop_server(server, sock)
 
     def test_grad_matches_local_for_tensor_inputs(self) -> None:
-        sock = "/tmp/tinyinterp_test_grad.sock"
+        sock = "/tmp/mirin_test_grad.sock"
         local_model = ti.Model(_seeded_model(GradProbeModel))
         local_site = local_model.hidden
         local_input = torch.tensor(
@@ -723,7 +723,7 @@ def test_remote_close_releases_unresolved_values() -> None:
             _stop_server(server, sock)
 
     def test_grad_rejects_prompt_requests(self) -> None:
-        sock = "/tmp/tinyinterp_test_grad_text.sock"
+        sock = "/tmp/mirin_test_grad_text.sock"
         server, _ = _start_server(FakeDecoderModel, sock)
         try:
             remote = ti.Model(f"unix://{sock}")
@@ -735,7 +735,7 @@ def test_remote_close_releases_unresolved_values() -> None:
             _stop_server(server, sock)
 
     def test_grad_handle_release_makes_future_fetches_fail(self) -> None:
-        sock = "/tmp/tinyinterp_test_grad_release.sock"
+        sock = "/tmp/mirin_test_grad_release.sock"
         server, _ = _start_server(lambda: _seeded_model(GradProbeModel), sock)
         try:
             remote = ti.Model(f"unix://{sock}")
@@ -754,7 +754,7 @@ def test_remote_close_releases_unresolved_values() -> None:
             _stop_server(server, sock)
 
     def test_remote_close_cleans_up_live_grad_handles(self) -> None:
-        sock = "/tmp/tinyinterp_test_grad_disconnect.sock"
+        sock = "/tmp/mirin_test_grad_disconnect.sock"
         server, _ = _start_server(lambda: _seeded_model(GradProbeModel), sock)
         try:
             remote = ti.Model(f"unix://{sock}")
@@ -778,7 +778,7 @@ def test_remote_close_releases_unresolved_values() -> None:
     def test_stop_at_last_get_validation_matches_local(self) -> None:
         """Unsupported stop_at_last_get combinations should raise instead of being ignored."""
 
-        sock = "/tmp/tinyinterp_test_validate.sock"
+        sock = "/tmp/mirin_test_validate.sock"
         server, _ = _start_server(FakeDecoderModel, sock)
         try:
             remote = ti.Model(f"unix://{sock}")
@@ -801,7 +801,7 @@ def test_remote_close_releases_unresolved_values() -> None:
     def test_single_example_not_chunked(self) -> None:
         """batch=1 is never chunked regardless of budget."""
 
-        sock = "/tmp/tinyinterp_test_single.sock"
+        sock = "/tmp/mirin_test_single.sock"
         server, _ = _start_server(FakeDecoderModel, sock)
         try:
             server.budget.gpu_budget = 1
@@ -816,7 +816,7 @@ def test_remote_close_releases_unresolved_values() -> None:
     def test_prompt_list_not_affected_by_chunking(self) -> None:
         """List-of-strings path goes through call_many, not auto-chunking."""
 
-        sock = "/tmp/tinyinterp_test_prompts.sock"
+        sock = "/tmp/mirin_test_prompts.sock"
         server, _ = _start_server(FakeDecoderModel, sock)
         try:
             server.budget.gpu_budget = 1

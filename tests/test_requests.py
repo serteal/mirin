@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 import torch
 
-from tinyinterp.requests import (
+from mirin.requests import (
     merge_request_kwargs,
     normalize_request_row,
     normalize_requests,

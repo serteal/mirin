@@ -8,7 +8,7 @@ from typing import cast
 import pytest
 import torch
 
-import tinyinterp as ti
+import mirin as ti
 
 from .helpers import FakeDecoderModel, FakeLlamaModel
 from .server_helpers import _ids, _seeded_model, _start_server, _stop_server
@@ -16,17 +16,17 @@ from .server_helpers import _ids, _seeded_model, _start_server, _stop_server
 
 class TestCpuMemoryDetection:
     def test_detects_positive_value(self) -> None:
-        from tinyinterp.server.memory import _cpu_memory_bytes
+        from mirin.server.memory import _cpu_memory_bytes
         assert _cpu_memory_bytes() > 0
 
     def test_less_than_physical(self) -> None:
         """cgroup limit should be less than raw MemTotal on constrained VMs."""
-        from tinyinterp.server.memory import _cpu_memory_bytes
+        from mirin.server.memory import _cpu_memory_bytes
         mem = _cpu_memory_bytes()
         assert mem < 1024 * (1024 ** 3)  # sanity: less than 1TB
 
     def test_at_least_1gb(self) -> None:
-        from tinyinterp.server.memory import _cpu_memory_bytes
+        from mirin.server.memory import _cpu_memory_bytes
         assert _cpu_memory_bytes() > 1024 ** 3
 
 
@@ -90,14 +90,14 @@ class TestMemoryBudget:
 
 class TestAutoChunk:
     def test_no_chunk_when_fits(self) -> None:
-        from tinyinterp.server.memory import auto_chunk
+        from mirin.server.memory import auto_chunk
         ids = _ids(4, 8)
         chunks = auto_chunk(ids, max_batch=10)
         assert len(chunks) == 1
         assert torch.equal(chunks[0]["input_ids"], ids)
 
     def test_chunks_when_exceeds(self) -> None:
-        from tinyinterp.server.memory import auto_chunk
+        from mirin.server.memory import auto_chunk
         ids = _ids(8, 4)
         chunks = auto_chunk(ids, max_batch=3)
         assert len(chunks) == 3  # 3+3+2
@@ -105,14 +105,14 @@ class TestAutoChunk:
         assert total == 8
 
     def test_chunks_preserve_data(self) -> None:
-        from tinyinterp.server.memory import auto_chunk
+        from mirin.server.memory import auto_chunk
         ids = _ids(6, 4)
         chunks = auto_chunk(ids, max_batch=2)
         reconstructed = torch.cat([c["input_ids"] for c in chunks], dim=0)
         assert torch.equal(reconstructed, ids)
 
     def test_extra_tensors_chunked_too(self) -> None:
-        from tinyinterp.server.memory import auto_chunk
+        from mirin.server.memory import auto_chunk
         ids = _ids(6, 4)
         mask = torch.ones(6, 4, dtype=torch.long)
         chunks = auto_chunk(ids, max_batch=2, extra_tensors={"attention_mask": mask})
@@ -120,7 +120,7 @@ class TestAutoChunk:
         assert chunks[0]["attention_mask"].shape[0] == 2
 
     def test_max_batch_1(self) -> None:
-        from tinyinterp.server.memory import auto_chunk
+        from mirin.server.memory import auto_chunk
         ids = _ids(3, 4)
         chunks = auto_chunk(ids, max_batch=1)
         assert len(chunks) == 3
@@ -131,7 +131,7 @@ class TestRemoteModelAutoChunking:
     def test_auto_chunks_large_batch(self) -> None:
         """Auto-chunking preserves the original batched output contract."""
 
-        sock = "/tmp/tinyinterp_test_chunk.sock"
+        sock = "/tmp/mirin_test_chunk.sock"
         server, _ = _start_server(FakeDecoderModel, sock)
         try:
             server.budget.gpu_budget = 1
@@ -147,7 +147,7 @@ class TestRemoteModelAutoChunking:
     def test_auto_chunk_activations_correct(self) -> None:
         """Chunked results match unchunked results."""
 
-        sock = "/tmp/tinyinterp_test_chunk_correct.sock"
+        sock = "/tmp/mirin_test_chunk_correct.sock"
         server, _ = _start_server(FakeDecoderModel, sock)
         try:
             remote = ti.Model(f"unix://{sock}")
@@ -176,7 +176,7 @@ class TestRemoteModelAutoChunking:
     def test_no_chunk_when_fits(self) -> None:
         """Small batch doesn't get chunked."""
 
-        sock = "/tmp/tinyinterp_test_no_chunk.sock"
+        sock = "/tmp/mirin_test_no_chunk.sock"
         server, _ = _start_server(FakeDecoderModel, sock)
         try:
             server.budget.gpu_budget = 10 ** 9
@@ -191,7 +191,7 @@ class TestRemoteModelAutoChunking:
     def test_collect_auto_chunks(self) -> None:
         """stop_at_last_get collection also auto-chunks."""
 
-        sock = "/tmp/tinyinterp_test_collect_chunk.sock"
+        sock = "/tmp/mirin_test_collect_chunk.sock"
         server, _ = _start_server(FakeDecoderModel, sock)
         try:
             server.budget.gpu_budget = 1
@@ -208,7 +208,7 @@ class TestRemoteModelAutoChunking:
     def test_collect_chunks_have_activations(self) -> None:
         """Chunked collection stitches activations back into one batch."""
 
-        sock = "/tmp/tinyinterp_test_collect_shape.sock"
+        sock = "/tmp/mirin_test_collect_shape.sock"
         server, _ = _start_server(FakeDecoderModel, sock)
         try:
             server.budget.gpu_budget = 1
@@ -226,7 +226,7 @@ class TestRemoteModelAutoChunking:
     def test_cpu_default_batch_not_chunked(self) -> None:
         """CPU-only servers keep the normal batched tensor contract by default."""
 
-        sock = "/tmp/tinyinterp_test_cpu_batch.sock"
+        sock = "/tmp/mirin_test_cpu_batch.sock"
         server, _ = _start_server(FakeDecoderModel, sock)
         try:
             remote = ti.Model(f"unix://{sock}")
@@ -241,7 +241,7 @@ class TestRemoteModelAutoChunking:
     def test_collect_fast_path_closes_collectors(self) -> None:
         """Internal collector fast path should not leak collector handles."""
 
-        sock = "/tmp/tinyinterp_test_collectors.sock"
+        sock = "/tmp/mirin_test_collectors.sock"
         server, _ = _start_server(FakeDecoderModel, sock)
         try:
             remote = ti.Model(f"unix://{sock}")
@@ -259,7 +259,7 @@ def test_model_tmp_path_is_loaded_like_a_model_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A local checkpoint directory in /tmp should not be mistaken for a socket."""
-    import tinyinterp.model as model_mod
+    import mirin.model as model_mod
 
     checkpoint = tmp_path / "checkpoint.sock"
     checkpoint.mkdir()

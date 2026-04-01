@@ -1,4 +1,4 @@
-"""CLI entrypoint for the tinyinterp Model API benchmark harness."""
+"""CLI entrypoint for the mirin Model API benchmark harness."""
 
 from __future__ import annotations
 

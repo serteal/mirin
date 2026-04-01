@@ -8,7 +8,7 @@ import struct
 import pytest
 import torch
 
-from tinyinterp.server.protocol import (
+from mirin.server.protocol import (
     MAX_DTYPE_NAME_BYTES,
     MAX_TENSOR_BYTES,
     MAX_TENSOR_NDIM,

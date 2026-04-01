@@ -1,4 +1,4 @@
-"""Debug logging helpers for tinyinterp."""
+"""Debug logging helpers for mirin."""
 
 from __future__ import annotations
 
@@ -117,7 +117,7 @@ def render_intervention_graph(
         '<rect width="100%" height="100%" fill="#f8f8f5" />',
         (
             '<text x="24" y="28" font-family="monospace" '
-            'font-size="14" fill="#222">tinyinterp intervention graph</text>'
+            'font-size="14" fill="#222">mirin intervention graph</text>'
         ),
         (
             '<text x="24" y="48" font-family="monospace" '

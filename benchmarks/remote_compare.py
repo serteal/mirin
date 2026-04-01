@@ -1,4 +1,4 @@
-"""User-visible local/remote comparison harness for tinyinterp."""
+"""User-visible local/remote comparison harness for mirin."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from typing import Any, cast
 
 import torch
 
-import tinyinterp as ti
+import mirin as ti
 
 from .model_api import _environment_report, _measure_case, _resolve_device, _resolve_dtype
 from .runtime_internals_shared import (
@@ -151,7 +151,7 @@ def run_remote_compare_benchmarks(config: RemoteCompareConfig) -> dict[str, Any]
     )
     local_cases = [
         _measure_case(
-            "tinyinterp_collect_local",
+            "mirin_collect_local",
             lambda model=local_ti, proxy=local_proxy, row=batch: _model_collect_loop(
                 model,
                 proxy,
@@ -163,7 +163,7 @@ def run_remote_compare_benchmarks(config: RemoteCompareConfig) -> dict[str, Any]
             use_counters=True,
         ),
         _measure_case(
-            "tinyinterp_generate_local",
+            "mirin_generate_local",
             lambda model=local_ti, reqs=requests: model.generate(
                 reqs,
                 max_new_tokens=config.max_new_tokens,
@@ -175,7 +175,7 @@ def run_remote_compare_benchmarks(config: RemoteCompareConfig) -> dict[str, Any]
             use_counters=True,
         ),
         _measure_case(
-            "tinyinterp_generate_get_all_local",
+            "mirin_generate_get_all_local",
             lambda model=local_ti, reqs=requests, proxy=local_proxy: model.generate(
                 reqs,
                 max_new_tokens=config.max_new_tokens,
@@ -189,7 +189,7 @@ def run_remote_compare_benchmarks(config: RemoteCompareConfig) -> dict[str, Any]
             use_counters=True,
         ),
         _measure_case(
-            "tinyinterp_generate_get_generated_local",
+            "mirin_generate_get_generated_local",
             lambda model=local_ti, reqs=requests, proxy=local_proxy: model.generate(
                 reqs,
                 max_new_tokens=config.max_new_tokens,
@@ -208,7 +208,7 @@ def run_remote_compare_benchmarks(config: RemoteCompareConfig) -> dict[str, Any]
 
     runtime_model = _load_model(_load_cfg(config.model_name), device=device, dtype=dtype)
     runtime = ti.Server(runtime_model)
-    remote_client, remote_proxy = _open_tinyinterp_remote(runtime, site_path)
+    remote_client, remote_proxy = _open_mirin_remote(runtime, site_path)
     remote_collect = remote_client.collect(requests, get=[remote_proxy])
     remote_collect_tensor = torch.cat(
         [cast(torch.Tensor, output[remote_proxy]).detach().cpu() for output in remote_collect],
@@ -258,7 +258,7 @@ def run_remote_compare_benchmarks(config: RemoteCompareConfig) -> dict[str, Any]
     )
     remote_cases = [
         _measure_case(
-            "tinyinterp_collect_remote",
+            "mirin_collect_remote",
             lambda: _model_collect_loop(remote_client, remote_proxy, [batch]),
             warmup=config.warmup,
             trials=config.trials,
@@ -266,7 +266,7 @@ def run_remote_compare_benchmarks(config: RemoteCompareConfig) -> dict[str, Any]
             use_counters=True,
         ),
         _measure_case(
-            "tinyinterp_generate_remote",
+            "mirin_generate_remote",
             lambda: remote_client.generate(
                 requests,
                 max_new_tokens=config.max_new_tokens,
@@ -278,7 +278,7 @@ def run_remote_compare_benchmarks(config: RemoteCompareConfig) -> dict[str, Any]
             use_counters=True,
         ),
         _measure_case(
-            "tinyinterp_generate_get_all_remote",
+            "mirin_generate_get_all_remote",
             lambda: remote_client.generate(
                 requests,
                 max_new_tokens=config.max_new_tokens,
@@ -292,7 +292,7 @@ def run_remote_compare_benchmarks(config: RemoteCompareConfig) -> dict[str, Any]
             use_counters=True,
         ),
         _measure_case(
-            "tinyinterp_generate_get_generated_remote",
+            "mirin_generate_get_generated_remote",
             lambda: remote_client.generate(
                 requests,
                 max_new_tokens=config.max_new_tokens,
@@ -447,20 +447,20 @@ def _performance_checks(cases: list[dict[str, Any]]) -> dict[str, dict[str, Any]
     by_name = {case["name"]: case for case in cases}
     return {
         "collect_remote_vs_local": _performance_check(
-            baseline=by_name["tinyinterp_collect_local"],
-            candidate=by_name["tinyinterp_collect_remote"],
+            baseline=by_name["mirin_collect_local"],
+            candidate=by_name["mirin_collect_remote"],
         ),
         "generate_remote_vs_local": _performance_check(
-            baseline=by_name["tinyinterp_generate_local"],
-            candidate=by_name["tinyinterp_generate_remote"],
+            baseline=by_name["mirin_generate_local"],
+            candidate=by_name["mirin_generate_remote"],
         ),
         "generate_get_all_remote_vs_local": _performance_check(
-            baseline=by_name["tinyinterp_generate_get_all_local"],
-            candidate=by_name["tinyinterp_generate_get_all_remote"],
+            baseline=by_name["mirin_generate_get_all_local"],
+            candidate=by_name["mirin_generate_get_all_remote"],
         ),
         "generate_get_generated_remote_vs_local": _performance_check(
-            baseline=by_name["tinyinterp_generate_get_generated_local"],
-            candidate=by_name["tinyinterp_generate_get_generated_remote"],
+            baseline=by_name["mirin_generate_get_generated_local"],
+            candidate=by_name["mirin_generate_get_generated_remote"],
         ),
     }
 
@@ -480,11 +480,11 @@ def _performance_check(
     }
 
 
-def _open_tinyinterp_remote(
+def _open_mirin_remote(
     server: ti.Server,
     site_path: str,
 ) -> tuple[Any, Any]:
-    sock_path = f"/tmp/tinyinterp-server-compare-{uuid.uuid4().hex}.sock"
+    sock_path = f"/tmp/mirin-server-compare-{uuid.uuid4().hex}.sock"
     thread = threading.Thread(target=server.serve, args=(sock_path,), daemon=True)
     thread.start()
     remote_client = _open_remote_model(sock_path)

@@ -8,7 +8,7 @@ import pytest
 import torch
 import transformers
 
-from tinyinterp.server.cache import DynamicBatchAdapter
+from mirin.server.cache import DynamicBatchAdapter
 
 
 class _FakeDynamicCache:

@@ -1,5 +1,5 @@
 [project]
-name = "tinyinterp"
+name = "mirin"
 version = "0.1.0"
 description = "Minimal activation access and intervention wrapper for PyTorch models."
 requires-python = ">=3.11"
@@ -31,11 +31,11 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["tinyinterp", "tinyinterp.server"]
+packages = ["mirin", "mirin.server"]
 include-package-data = true
 
 [tool.setuptools.package-data]
-tinyinterp = ["py.typed"]
+mirin = ["py.typed"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -60,13 +60,13 @@ line-length = 100
 select = ["A", "B", "E", "F", "I", "UP"]
 
 [tool.ruff.lint.per-file-ignores]
-"tinyinterp/model.py" = ["A002"]
-"tinyinterp/server/remote.py" = ["A002", "E701"]
+"mirin/model.py" = ["A002"]
+"mirin/server/remote.py" = ["A002", "E701"]
 
 [tool.mypy]
 python_version = "3.11"
 strict = true
-packages = ["tinyinterp"]
+packages = ["mirin"]
 warn_unused_configs = true
 check_untyped_defs = true
 explicit_package_bases = true
