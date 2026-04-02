@@ -1,4 +1,4 @@
-"""Large-workload dataset-loop comparison for tinyinterp, TransformerLens, and nnterp."""
+"""Large-workload dataset-loop comparison for mirin, TransformerLens, and nnterp."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from typing import Any
 
 import torch
 
-import tinyinterp as ti
+import mirin as ti
 
 from .compare_libraries import (
     _compare_tensors,
@@ -111,8 +111,8 @@ def run_streaming_compare_benchmarks(config: StreamingCompareConfig) -> dict[str
     tiny_manual_first = tiny_model(**first_chunk, get=[tiny_site])[tiny_site]
     tiny_case = _tag_stream_case(
         _measure_case(
-            "tinyinterp_manual_loop",
-            lambda model=tiny_model, site=tiny_site: _run_tinyinterp_manual_loop(
+            "mirin_manual_loop",
+            lambda model=tiny_model, site=tiny_site: _run_mirin_manual_loop(
                 model,
                 dataset,
                 site,
@@ -123,7 +123,7 @@ def run_streaming_compare_benchmarks(config: StreamingCompareConfig) -> dict[str
             device=device,
             use_counters=True,
         ),
-        library="tinyinterp_manual",
+        library="mirin_manual",
     )
     tiny_site_path = tiny_site.path
     del tiny_model
@@ -178,7 +178,7 @@ def run_streaming_compare_benchmarks(config: StreamingCompareConfig) -> dict[str
     _release_models(device)
 
     correctness = {
-        "tinyinterp_manual": _compare_tensors(
+        "mirin_manual": _compare_tensors(
             reference_activation.detach().cpu(),
             tiny_manual_first.detach().cpu(),
         ),
@@ -210,7 +210,7 @@ def run_streaming_compare_benchmarks(config: StreamingCompareConfig) -> dict[str
             "total_examples": total_examples,
             "site_mapping": {
                 "hf_block_path": config.hf_block_path,
-                "tinyinterp_site": tiny_site_path,
+                "mirin_site": tiny_site_path,
                 "transformerlens_hook": config.lens_hook_name,
                 "nnterp_site": "layers_output[0]",
             },
@@ -334,7 +334,7 @@ def _run_raw_stream_loop(
     ]
 
 
-def _run_tinyinterp_manual_loop(
+def _run_mirin_manual_loop(
     model: ti.Model,
     dataset: list[dict[str, Any]],
     site: Any,

@@ -1,1 +1,1 @@
-"""Test package for tinyinterp."""
+"""Test package for mirin."""

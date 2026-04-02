@@ -1,4 +1,4 @@
-"""Permanent hook management for tinyinterp."""
+"""Permanent hook management for mirin."""
 
 from __future__ import annotations
 
@@ -48,7 +48,7 @@ class HookState:
         self._paths: list[str] = []
         self._handles: list[RemovableHandle] = []
         self._current: ContextVar[_CallState | None] = ContextVar(
-            "tinyinterp_hook_state", default=None
+            "mirin_hook_state", default=None
         )
 
     @property

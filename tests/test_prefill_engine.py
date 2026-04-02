@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import torch
 
-from tinyinterp.server.prefill_engine import _apply_reducer, _merge_chunk_result
-from tinyinterp.server.results import PlanResult
+from mirin.server.prefill_engine import _apply_reducer, _merge_chunk_result
+from mirin.server.results import PlanResult
 
 
 def test_apply_reducer_handles_token_index_and_last_token() -> None:

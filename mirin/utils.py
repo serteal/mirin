@@ -57,7 +57,7 @@ def children(proxy: _ProxyLike) -> list[tuple[str, str]]:
 def _ensure_proxy(proxy: object) -> _ProxyLike:
     module = getattr(proxy, "_module", None)
     if not isinstance(module, nn.Module):
-        raise TypeError("Expected a tinyinterp module proxy.")
+        raise TypeError("Expected a mirin module proxy.")
     return cast(_ProxyLike, proxy)
 
 

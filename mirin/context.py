@@ -1,4 +1,4 @@
-"""Scoped configuration for tinyinterp."""
+"""Scoped configuration for mirin."""
 
 from __future__ import annotations
 
@@ -56,7 +56,7 @@ def get_graph_path() -> str | None:
 
 
 class context(ContextDecorator):
-    """Temporarily override tinyinterp configuration inside a block."""
+    """Temporarily override mirin configuration inside a block."""
 
     def __init__(
         self,

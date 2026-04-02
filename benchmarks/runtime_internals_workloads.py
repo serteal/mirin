@@ -10,7 +10,7 @@ from typing import Any, cast
 
 import torch
 
-import tinyinterp as ti
+import mirin as ti
 
 from .runtime_internals_shared import (
     _clear_cuda,
@@ -69,7 +69,7 @@ def _correctness_checks(
         "ok": torch.allclose(server_act, manual, atol=1e-4, rtol=1e-4),
         "max_abs_diff": float((server_act - manual).abs().max().item()),
     }
-    remote_sock = f"/tmp/tinyinterp-correctness-{uuid.uuid4().hex}.sock"
+    remote_sock = f"/tmp/mirin-correctness-{uuid.uuid4().hex}.sock"
     remote_thread = threading.Thread(target=server.serve, args=(remote_sock,), daemon=True)
     remote_thread.start()
     remote_client = _open_remote_model(remote_sock)
@@ -169,19 +169,19 @@ def _correctness_checks(
     inspect_local_model = _load_model(config, device=device, dtype=dtype)
     inspect_local_ti = ti.Model(inspect_local_model)
     inspect_proxy = _resolve_proxy(inspect_local_ti, site_path)
-    local_inspect_tokens, local_inspect_total = _tinyinterp_decode_batched(
+    local_inspect_tokens, local_inspect_total = _mirin_decode_batched(
         inspect_local_ti,
         prompts,
         max_new_tokens=config.max_new_tokens,
         proxy=inspect_proxy,
     )
-    local_steer_generate = _tinyinterp_generate_batched(
+    local_steer_generate = _mirin_generate_batched(
         inspect_local_ti,
         prompts,
         max_new_tokens=config.max_new_tokens,
         mapping={inspect_proxy: ti.zero()},
     )
-    _local_steer_tokens, _ = _tinyinterp_decode_batched(
+    _local_steer_tokens, _ = _mirin_decode_batched(
         inspect_local_ti,
         prompts,
         max_new_tokens=config.max_new_tokens,
@@ -238,7 +238,7 @@ def _correctness_checks(
     return checks
 
 
-def _tinyinterp_capture_loop(
+def _mirin_capture_loop(
     model: ti.Model,
     proxy: Any,
     dataset: list[dict[str, torch.Tensor]],
@@ -423,7 +423,7 @@ def _server_call_concurrent(
     return sum(totals)
 
 
-def _tinyinterp_decode_batched(
+def _mirin_decode_batched(
     model: ti.Model,
     prompts: Mapping[str, torch.Tensor],
     *,
@@ -522,7 +522,7 @@ def _tinyinterp_decode_batched(
     return _pad_batch_sequences(rows, pad_token_id=pad_token_id), total
 
 
-def _tinyinterp_generate_batched(
+def _mirin_generate_batched(
     model: ti.Model,
     prompts: Mapping[str, torch.Tensor],
     *,
@@ -590,7 +590,7 @@ def _annotate_server_metrics(
         if case.get("skipped"):
             continue
         name = case["name"]
-        if name in {"hf_hook_loop", "tinyinterp_capture_loop", "server_collector"}:
+        if name in {"hf_hook_loop", "mirin_capture_loop", "server_collector"}:
             case["examples_per_sec"] = examples / (case["median_ms"] / 1000.0)
             case["tokens_per_sec"] = (examples * config.seq_len) / (case["median_ms"] / 1000.0)
         elif name in {"hf_generate_single", "server_generate_single"}:
@@ -605,10 +605,10 @@ def _annotate_server_metrics(
             "server_generate_multi_session_static",
             "server_generate_batched_map",
             "server_generate_many_map",
-            "tinyinterp_generate_map_batched",
-            "tinyinterp_decode_get_batched",
+            "mirin_generate_map_batched",
+            "mirin_decode_get_batched",
             "server_decode_get_multi_session",
-            "tinyinterp_decode_map_batched",
+            "mirin_decode_map_batched",
             "server_decode_map_multi_session",
         }:
             case["examples_per_sec"] = config.generate_batch_size / (case["median_ms"] / 1000.0)

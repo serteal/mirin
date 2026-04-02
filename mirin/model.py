@@ -1,4 +1,4 @@
-"""Model wrapper and module proxying for tinyinterp."""
+"""Model wrapper and module proxying for mirin."""
 
 from __future__ import annotations
 
@@ -316,7 +316,7 @@ class Model:
 
     def _validate_proxy(self, proxy: object) -> _ModuleProxy:
         if not isinstance(proxy, _ModuleProxy):
-            raise TypeError("get= and map= must use tinyinterp module proxies.")
+            raise TypeError("get= and map= must use mirin module proxies.")
         if proxy._hooks is not self._hooks:
             raise ValueError(f"Proxy {proxy.path!r} does not belong to this model.")
         return proxy
@@ -546,7 +546,7 @@ def _load_model(name_or_path: str, **load_kwargs: Any) -> nn.Module:
     except ImportError as exc:
         raise ImportError(
             f'ti.Model("{name_or_path}") requires `transformers` to load models by name.\n'
-            "Install with: pip install tinyinterp[transformers]\n"
+            "Install with: pip install mirin[transformers]\n"
             "Or pass an already-loaded model: ti.Model(your_model)"
         ) from exc
 

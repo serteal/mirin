@@ -1,4 +1,4 @@
-"""Persistent server and remote client for tinyinterp."""
+"""Persistent server and remote client for mirin."""
 
 from __future__ import annotations
 
@@ -54,7 +54,7 @@ def serve(server: Any, sock_path: str) -> None:
     compile_cache: dict[bytes, str] = {}
     server._listen_socket = ssock
     server._listen_path = sock_path
-    print(f"tinyinterp server listening on {sock_path}")
+    print(f"mirin server listening on {sock_path}")
     try:
         while not server._serve_shutdown.is_set():
             try:
@@ -479,7 +479,7 @@ class _RemoteModuleList:
 
 
 class _RemoteModel:
-    """Client model that connects to a remote tinyinterp server over Unix socket."""
+    """Client model that connects to a remote mirin server over Unix socket."""
 
     def __init__(self, sock_path: str) -> None:
         self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -492,7 +492,7 @@ class _RemoteModel:
         remote_proto = int(self.capabilities.get("protocol", -1))
         if remote_proto != PROTO_VERSION:
             raise RuntimeError(
-                f"tinyinterp protocol mismatch: client={PROTO_VERSION} server={remote_proto}"
+                f"mirin protocol mismatch: client={PROTO_VERSION} server={remote_proto}"
             )
         tree = json.loads(cast(bytes, self._roundtrip(Cmd.TREE, raw=True)))
         self._types, self._children, self._path_to_sid = index_tree(tree)
@@ -814,5 +814,5 @@ def _encode_remote_map_spec(sid: int, fn: Any) -> dict[str, Any]:
     if isinstance(fn, maps_mod._Replace):
         return {"sid": sid, "op": "replace", "value": fn.value}
     raise TypeError(
-        "tinyinterp remote execution only supports built-in map ops: zero, add, scale, replace."
+        "mirin remote execution only supports built-in map ops: zero, add, scale, replace."
     )

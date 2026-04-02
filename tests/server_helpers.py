@@ -10,7 +10,7 @@ from typing import Any
 import torch
 import torch.nn as nn
 
-import tinyinterp as ti
+import mirin as ti
 
 from .helpers import FakeTokenizer
 

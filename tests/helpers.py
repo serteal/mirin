@@ -1,4 +1,4 @@
-"""Small fake models used by tinyinterp tests."""
+"""Small fake models used by mirin tests."""
 
 from __future__ import annotations
 
@@ -433,7 +433,7 @@ def get_module(model: nn.Module, path: str) -> nn.Module:
 
 
 def get_proxy(model: Any, path: str) -> Any:
-    """Resolve a dotted proxy path against a tinyinterp model."""
+    """Resolve a dotted proxy path against a mirin model."""
 
     current = model
     for part in path.split("."):

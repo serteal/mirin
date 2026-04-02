@@ -12,9 +12,9 @@ from typing import Any, cast
 import torch
 import torch.nn as nn
 
-import tinyinterp as ti
-from tinyinterp.hooks import _extract
-from tinyinterp.output import Output
+import mirin as ti
+from mirin.hooks import _extract
+from mirin.output import Output
 
 from .model_api import _config_value
 

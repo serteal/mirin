@@ -8,9 +8,9 @@ from typing import Any
 import pytest
 import torch
 
-import tinyinterp as ti
-from tinyinterp.server.cache import FallbackCacheAdapter
-from tinyinterp.server.decode_engine import DecodeFamily
+import mirin as ti
+from mirin.server.cache import FallbackCacheAdapter
+from mirin.server.decode_engine import DecodeFamily
 
 from .helpers import FakeLlamaModel
 

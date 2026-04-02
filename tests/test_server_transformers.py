@@ -8,8 +8,8 @@ import pytest
 import torch
 import torch.nn as nn
 
-import tinyinterp as ti
-from tinyinterp.server.cache import QwenHybridAdapter
+import mirin as ti
+from mirin.server.cache import QwenHybridAdapter
 
 from .helpers import get_proxy
 from .server_helpers import Qwen3_5DynamicCache, _HybridTextConfig

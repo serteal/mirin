@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 import torch
 
-from tinyinterp.refs import (
+from mirin.refs import (
     RemoteGradValueRef,
     RemoteValueRef,
     _RemoteGradHandle,

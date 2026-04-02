@@ -1,4 +1,4 @@
-"""Public package exports for tinyinterp."""
+"""Public package exports for mirin."""
 
 from . import renames
 from .batch import batch

@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from tinyinterp.server.sessions import SamplingConfig, merge_batch_tensors, sample_next_token
+from mirin.server.sessions import SamplingConfig, merge_batch_tensors, sample_next_token
 
 
 def test_sample_next_token_argmax_and_temperature_validation() -> None:

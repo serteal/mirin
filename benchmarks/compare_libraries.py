@@ -1,4 +1,4 @@
-"""Cross-library benchmark harness for tinyinterp, TransformerLens, and nnterp."""
+"""Cross-library benchmark harness for mirin, TransformerLens, and nnterp."""
 
 from __future__ import annotations
 
@@ -12,8 +12,8 @@ from typing import Any, cast
 import torch
 import torch.nn as nn
 
-import tinyinterp as ti
-from tinyinterp.hooks import _extract, _replace
+import mirin as ti
+from mirin.hooks import _extract, _replace
 
 from .model_api import (
     _config_value,
@@ -101,31 +101,31 @@ def run_compare_benchmarks(config: CompareConfig) -> dict[str, Any]:
     tiny_cases = [
         _tag_case(
             _measure_case(
-                "tinyinterp_forward",
+                "mirin_forward",
                 lambda model=tiny_model: model(**raw_inputs),
                 warmup=config.warmup,
                 trials=config.trials,
                 device=device,
                 use_counters=True,
             ),
-            library="tinyinterp",
+            library="mirin",
             operation="forward",
         ),
         _tag_case(
             _measure_case(
-                "tinyinterp_get_one",
+                "mirin_get_one",
                 lambda model=tiny_model, site=tiny_site: model(**raw_inputs, get=[site]),
                 warmup=config.warmup,
                 trials=config.trials,
                 device=device,
                 use_counters=True,
             ),
-            library="tinyinterp",
+            library="mirin",
             operation="get_one",
         ),
         _tag_case(
             _measure_case(
-                "tinyinterp_capture_only",
+                "mirin_capture_only",
                 lambda model=tiny_model, site=tiny_site: model(
                     **raw_inputs,
                     get=[site],
@@ -136,12 +136,12 @@ def run_compare_benchmarks(config: CompareConfig) -> dict[str, Any]:
                 device=device,
                 use_counters=True,
             ),
-            library="tinyinterp",
+            library="mirin",
             operation="capture_only",
         ),
         _tag_case(
             _measure_case(
-                "tinyinterp_map_one",
+                "mirin_map_one",
                 lambda model=tiny_model, site=tiny_site: model(
                     **raw_inputs,
                     map={site: ti.zero()},
@@ -151,7 +151,7 @@ def run_compare_benchmarks(config: CompareConfig) -> dict[str, Any]:
                 device=device,
                 use_counters=True,
             ),
-            library="tinyinterp",
+            library="mirin",
             operation="map_one",
         ),
     ]
@@ -186,11 +186,11 @@ def run_compare_benchmarks(config: CompareConfig) -> dict[str, Any]:
     _release_models(device)
 
     correctness = {
-        "tinyinterp_forward": _compare_tensors(raw_logits, tiny_forward.logits),
-        "tinyinterp_get_one_logits": _compare_tensors(raw_logits, tiny_capture.logits),
-        "tinyinterp_get_one_activation": _compare_tensors(manual_capture, tiny_capture[tiny_site]),
-        "tinyinterp_capture_only_activation": _compare_tensors(manual_capture, tiny_capture_only),
-        "tinyinterp_map_one": _compare_tensors(manual_zero_logits, tiny_zero.logits),
+        "mirin_forward": _compare_tensors(raw_logits, tiny_forward.logits),
+        "mirin_get_one_logits": _compare_tensors(raw_logits, tiny_capture.logits),
+        "mirin_get_one_activation": _compare_tensors(manual_capture, tiny_capture[tiny_site]),
+        "mirin_capture_only_activation": _compare_tensors(manual_capture, tiny_capture_only),
+        "mirin_map_one": _compare_tensors(manual_zero_logits, tiny_zero.logits),
     }
     correctness.update(lens_correctness)
     correctness.update(nn_correctness)
@@ -204,7 +204,7 @@ def run_compare_benchmarks(config: CompareConfig) -> dict[str, Any]:
             **env,
             "site_mapping": {
                 "hf_block_path": manual_path,
-                "tinyinterp_site": tiny_site_path,
+                "mirin_site": tiny_site_path,
                 "transformerlens_hook": config.lens_hook_name,
                 "transformerlens_stop_at_layer": config.lens_stop_at_layer,
                 "nnterp_site": "layers_output[0]",

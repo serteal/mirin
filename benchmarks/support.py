@@ -21,7 +21,7 @@ class LibrarySpec:
 
 LOCAL_LIBRARY_SPECS = (
     LibrarySpec(name="raw_hf", package="transformers", module="transformers"),
-    LibrarySpec(name="tinyinterp_local"),
+    LibrarySpec(name="mirin_local"),
     LibrarySpec(
         name="transformerlens",
         package="transformer-lens",
@@ -34,8 +34,8 @@ LOCAL_LIBRARY_SPECS = (
 
 REMOTE_LIBRARY_SPECS = (
     LibrarySpec(name="hf_generate", package="transformers", module="transformers"),
-    LibrarySpec(name="tinyinterp_local"),
-    LibrarySpec(name="tinyinterp_remote"),
+    LibrarySpec(name="mirin_local"),
+    LibrarySpec(name="mirin_remote"),
 )
 
 

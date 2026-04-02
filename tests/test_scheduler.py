@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import torch
 
-import tinyinterp as ti
-from tinyinterp.server.plans import compile_plan
-from tinyinterp.server.scheduler import (
+import mirin as ti
+from mirin.server.plans import compile_plan
+from mirin.server.scheduler import (
     QueueMetrics,
     bucket_length,
     chunk_sessions_by_decode_budget,

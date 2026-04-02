@@ -9,8 +9,8 @@ from typing import Any, cast
 import pytest
 import torch
 
-import tinyinterp as ti
-from tinyinterp.hooks import _extract, _replace
+import mirin as ti
+from mirin.hooks import _extract, _replace
 
 from .helpers import get_module
 

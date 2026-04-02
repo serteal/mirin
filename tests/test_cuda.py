@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 import torch
 
-import tinyinterp as ti
+import mirin as ti
 
 from .helpers import FakeDecoderModel, FakeTokenizer, get_proxy
 from .test_server_transformers import _build_llama31
@@ -87,7 +87,7 @@ def test_cuda_local_server_remote_e2e() -> None:
     finally:
         server.close()
 
-    sock = "/tmp/tinyinterp_test_cuda_remote.sock"
+    sock = "/tmp/mirin_test_cuda_remote.sock"
     remote_server = ti.Server(
         FakeDecoderModel().to("cuda"),
         tokenizer=FakeTokenizer(),

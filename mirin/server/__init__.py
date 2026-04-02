@@ -1,4 +1,4 @@
-"""Inference-server exports for tinyinterp."""
+"""Inference-server exports for mirin."""
 
 from .collector import Collector
 from .inference import Server

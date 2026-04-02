@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 
-from tinyinterp.server.remote import _RemoteModel
+from mirin.server.remote import _RemoteModel
 
 
 def test_remote_release_logs_os_errors(caplog) -> None:

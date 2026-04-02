@@ -13,7 +13,7 @@ from typing import Any, cast
 
 import torch
 
-import tinyinterp as ti
+import mirin as ti
 
 from .model_api import (
     _environment_report,
@@ -43,9 +43,9 @@ from .runtime_internals_workloads import (
     _server_collector_loop,
     _server_multi_session,
     _server_multi_session_stepwise,
-    _tinyinterp_capture_loop,
-    _tinyinterp_decode_batched,
-    _tinyinterp_generate_batched,
+    _mirin_capture_loop,
+    _mirin_decode_batched,
+    _mirin_generate_batched,
 )
 
 DEFAULT_MODEL_NAMES = (
@@ -182,8 +182,8 @@ def run_runtime_internals_benchmarks(config: RuntimeInternalsBenchmarkConfig) ->
     local_proxy = _resolve_proxy(local_ti, site_path)
     cases.append(
         _measure_case(
-            "tinyinterp_capture_loop",
-            lambda model=local_ti, proxy=local_proxy, rows=dataset: _tinyinterp_capture_loop(
+            "mirin_capture_loop",
+            lambda model=local_ti, proxy=local_proxy, rows=dataset: _mirin_capture_loop(
                 model,
                 proxy,
                 rows,
@@ -342,8 +342,8 @@ def run_runtime_internals_benchmarks(config: RuntimeInternalsBenchmarkConfig) ->
     )
     cases.append(
         _measure_case(
-            "tinyinterp_generate_map_batched",
-            lambda model=local_ti, rows=prompts: _tinyinterp_generate_batched(
+            "mirin_generate_map_batched",
+            lambda model=local_ti, rows=prompts: _mirin_generate_batched(
                 model,
                 rows,
                 max_new_tokens=config.max_new_tokens,
@@ -357,8 +357,8 @@ def run_runtime_internals_benchmarks(config: RuntimeInternalsBenchmarkConfig) ->
     )
     cases.append(
         _measure_case(
-            "tinyinterp_decode_get_batched",
-            lambda model=local_ti, rows=prompts: _tinyinterp_decode_batched(
+            "mirin_decode_get_batched",
+            lambda model=local_ti, rows=prompts: _mirin_decode_batched(
                 model,
                 rows,
                 max_new_tokens=config.max_new_tokens,
@@ -388,8 +388,8 @@ def run_runtime_internals_benchmarks(config: RuntimeInternalsBenchmarkConfig) ->
     )
     cases.append(
         _measure_case(
-            "tinyinterp_decode_map_batched",
-            lambda model=local_ti, rows=prompts: _tinyinterp_decode_batched(
+            "mirin_decode_map_batched",
+            lambda model=local_ti, rows=prompts: _mirin_decode_batched(
                 model,
                 rows,
                 max_new_tokens=config.max_new_tokens,
@@ -441,7 +441,7 @@ def run_runtime_internals_benchmarks(config: RuntimeInternalsBenchmarkConfig) ->
                 "skipped": "unsupported_static_cache",
             }
         )
-    remote_sock = f"/tmp/tinyinterp-bench-{uuid.uuid4().hex}.sock"
+    remote_sock = f"/tmp/mirin-bench-{uuid.uuid4().hex}.sock"
     remote_thread = threading.Thread(target=server.serve, args=(remote_sock,), daemon=True)
     remote_thread.start()
     remote_client = _open_remote_model(remote_sock)

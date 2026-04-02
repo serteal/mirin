@@ -1,4 +1,4 @@
-"""Core tests for the proxy-based tinyinterp API."""
+"""Core tests for the proxy-based mirin API."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-import tinyinterp as ti
+import mirin as ti
 
 from .helpers import (
     FakeDecoderModel,
