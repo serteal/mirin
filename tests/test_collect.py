@@ -51,7 +51,7 @@ def test_resolve_layer_sites_supports_block_and_layernorm() -> None:
     model.close()
 
 
-def test_stream_collect_respects_batch_size_and_token_budget() -> None:
+def test_model_collect_iterator_respects_batch_size_and_token_budget() -> None:
     model = ti.Model(_TinyModel())
     requests = [
         _token_request(6, 0),
@@ -61,13 +61,14 @@ def test_stream_collect_respects_batch_size_and_token_budget() -> None:
     site = ti.resolve_layer_sites(model, [1])[0]
 
     batches = list(
-        ti.stream_collect(
-            model,
+        model.collect(
             requests,
             get=[site],
-            batch_size=3,
-            batch_token_budget=8,
-            sort_by_length=True,
+            process=lambda step: step,
+            max_items=3,
+            max_tokens=8,
+            sort=True,
+            stop_at_last_get=True,
         )
     )
 

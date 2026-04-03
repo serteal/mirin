@@ -14,7 +14,7 @@ from typing import Any
 import torch
 import torch.nn as nn
 
-from mirin import Model, renames, resolve_layer_sites, stream_collect
+from mirin import Model, renames, resolve_layer_sites
 
 
 class _ToyTokenizer:
@@ -222,24 +222,24 @@ def _run_collect_pass(
     total_tokens = 0
     max_batch_rows = 0
     started = time.perf_counter()
-    for batch in stream_collect(
-        model,
+    for step in model.collect(
         requests,
         get=sites,
-        batch_size=batch_size,
-        batch_token_budget=batch_token_budget,
-        sort_by_length=sort_by_length,
+        process=lambda step: step,
+        max_items=batch_size,
+        max_tokens=batch_token_budget,
+        sort=sort_by_length,
         stop_at_last_get=True,
     ):
-        max_batch_rows = max(max_batch_rows, len(batch.indices))
-        for output, row, idx in zip(batch.outputs, batch.rows, batch.indices, strict=True):
+        max_batch_rows = max(max_batch_rows, len(step.indices))
+        for local_idx, (row, idx) in enumerate(zip(step.rows, step.indices, strict=True)):
             length = int(row["attention_mask"].sum().item())
             total_tokens += length
             pooled[idx] = [
-                _cast_tensor(output[path])[0, :length].mean(dim=0).detach().cpu()
+                _cast_tensor(step[path])[local_idx, :length].mean(dim=0).detach().cpu()
                 for path in paths
             ]
-            output.release()
+        step.release()
     elapsed_s = max(time.perf_counter() - started, 1e-9)
     return {
         "elapsed_s": elapsed_s,

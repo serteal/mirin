@@ -141,17 +141,18 @@ def _load_model(
     device: torch.device,
     dtype: torch.dtype,
 ) -> tuple[Any, Any]:
+    import mirin as mi
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     token = os.environ.get("HF_TOKEN")
     try:
-        model = AutoModelForCausalLM.from_pretrained(
+        hf_model = AutoModelForCausalLM.from_pretrained(
             model_name,
             torch_dtype=dtype,
             token=token,
         )
     except TypeError:
-        model = AutoModelForCausalLM.from_pretrained(
+        hf_model = AutoModelForCausalLM.from_pretrained(
             model_name,
             dtype=dtype,
             token=token,
@@ -163,10 +164,11 @@ def _load_model(
     )
     if tokenizer.pad_token_id is None and tokenizer.eos_token is not None:
         tokenizer.pad_token = tokenizer.eos_token
-    model.to(device)
-    model.eval()
-    for param in model.parameters():
+    hf_model.to(device)
+    hf_model.eval()
+    for param in hf_model.parameters():
         param.requires_grad_(False)
+    model = mi.Model(hf_model, rename=mi.renames.llm, tokenizer=tokenizer)
     return model, tokenizer
 
 
@@ -299,7 +301,7 @@ def main(argv: list[str] | None = None) -> int:
     model, tokenizer = _load_model(model_name=args.model, device=device, dtype=dtype)
     dataset = _build_dataset(pl, n_samples=args.samples, min_len=args.min_len, max_len=args.max_len)
     tokens = pl.tokenize_dataset(dataset, tokenizer, mask=pl.masks.assistant())
-    model_layer_count = int(getattr(model.config, "num_hidden_layers"))
+    model_layer_count = int(getattr(model.wrapped.config, "num_hidden_layers"))
     layer = (model_layer_count // 2) if args.layer < 0 else min(args.layer, model_layer_count - 1)
     result_dir = Path(args.result_dir).resolve()
     result_dir.mkdir(parents=True, exist_ok=True)

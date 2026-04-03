@@ -2,7 +2,7 @@
 
 from . import renames
 from .batch import batch
-from .collect import CollectStep, resolve_layer_sites, stream_collect
+from .collect import CollectStep, resolve_layer_sites
 from .context import context
 from .counters import Counters
 from .maps import add, map_head, noise, replace, scale, slice_head, zero
@@ -29,6 +29,5 @@ __all__ = [
     "resolve_layer_sites",
     "scale",
     "slice_head",
-    "stream_collect",
     "zero",
 ]

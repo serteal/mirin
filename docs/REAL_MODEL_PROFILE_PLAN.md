@@ -55,7 +55,6 @@ Relevant implementation points:
 
 - `probelab/processing/activations.py`
 - `perf_checks/profile_score_benchmark.py`
-- `perf_checks/backend_benchmark.py`
 
 
 ## Workload Matrix
