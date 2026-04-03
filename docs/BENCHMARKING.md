@@ -1,6 +1,6 @@
 # Benchmarking Philosophy
 
-`tinyinterp` should follow the same basic rule stated in the plan: if we claim a speedup, we benchmark it. The benchmark is not a marketing artifact. It is the evidence that a feature improved the real workload without making the system harder to understand or maintain.
+`mirin` should follow the same basic rule stated in the plan: if we claim a speedup, we benchmark it. The benchmark is not a marketing artifact. It is the evidence that a feature improved the real workload without making the system harder to understand or maintain.
 
 ## Principles
 
@@ -13,9 +13,9 @@
 3. Compare against the right baseline.
    The main baselines are:
    - raw wrapped model
-   - `tinyinterp` with no `get=` / `map=`
-   - `tinyinterp` eager `get=` / `map=`
-   - `tinyinterp` inside `ti.batch()`
+   - `mirin` with no `get=` / `map=`
+   - `mirin` eager `get=` / `map=`
+   - `mirin` inside `ti.batch()`
 
 4. Report environment exactly.
    Every result should include:

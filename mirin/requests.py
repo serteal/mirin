@@ -1,4 +1,4 @@
-"""Shared request normalization for local and server-backed model APIs."""
+"""Shared request normalization for local model APIs."""
 
 from __future__ import annotations
 
@@ -99,39 +99,53 @@ def normalize_requests(
         )
         for request in items
     ]
+    return batch_request_rows(
+        rows,
+        pad_side=pad_side,
+        pad_token_id=pad_token_id,
+    )
+
+
+def batch_request_rows(
+    rows: Sequence[Mapping[str, torch.Tensor]],
+    *,
+    pad_side: str,
+    pad_token_id: int,
+) -> RequestBatch:
+    if not rows:
+        raise ValueError("Expected at least one request.")
     devices = {row["input_ids"].device for row in rows}
     if len(devices) != 1:
         raise ValueError("All batched requests must live on the same device.")
+    tensor_keys = set(rows[0])
+    for row in rows[1:]:
+        if set(row) != tensor_keys:
+            raise ValueError("All request rows in a batch must have the same tensor keys.")
     max_len = max(int(row["input_ids"].shape[-1]) for row in rows)
     device = rows[0]["input_ids"].device
-    batch_input_ids = torch.full(
-        (len(rows), max_len),
-        pad_token_id,
-        dtype=torch.long,
-        device=device,
-    )
-    batch_attention = torch.zeros(
-        (len(rows), max_len),
-        dtype=torch.long,
-        device=device,
-    )
+    batch: dict[str, torch.Tensor] = {}
+    for key in sorted(tensor_keys):
+        first = rows[0][key]
+        if not isinstance(first, torch.Tensor):
+            raise TypeError(f"Request field {key!r} must be a tensor.")
+        fill_value = pad_token_id if key == "input_ids" else 0
+        batch[key] = torch.full(
+            (len(rows), max_len),
+            fill_value,
+            dtype=first.dtype,
+            device=device,
+        )
     for idx, row in enumerate(rows):
-        input_ids = row["input_ids"].view(-1)
-        attention_mask = row["attention_mask"].view(-1)
-        length = int(input_ids.shape[0])
-        if pad_side == "left":
-            batch_input_ids[idx, max_len - length :] = input_ids
-            batch_attention[idx, max_len - length :] = attention_mask
-        else:
-            batch_input_ids[idx, :length] = input_ids
-            batch_attention[idx, :length] = attention_mask
-    return RequestBatch(
-        rows=rows,
-        batch={
-            "input_ids": batch_input_ids,
-            "attention_mask": batch_attention,
-        },
-    )
+        length = int(row["input_ids"].shape[-1])
+        for key, batch_value in batch.items():
+            value = row[key].view(-1)
+            if int(value.shape[0]) != length:
+                raise ValueError(f"Request field {key!r} must match input_ids length.")
+            if pad_side == "left":
+                batch_value[idx, max_len - length :] = value
+            else:
+                batch_value[idx, :length] = value
+    return RequestBatch(rows=[dict(row) for row in rows], batch=batch)
 
 
 def merge_request_kwargs(
@@ -163,10 +177,34 @@ def _normalize_token_request(request: Mapping[str, Any]) -> dict[str, torch.Tens
         attention_mask = coerce_token_tensor(attention_value, name="attention_mask")
         if attention_mask.shape != input_ids.shape:
             raise ValueError("attention_mask must match input_ids shape.")
-    return {
+    normalized = {
         "input_ids": input_ids,
         "attention_mask": attention_mask,
     }
+    for key, value in request.items():
+        if key in normalized:
+            continue
+        tensor = _coerce_optional_row_tensor(value)
+        if tensor is None:
+            continue
+        if tensor.shape != input_ids.shape:
+            raise ValueError(f"{key} must match input_ids shape.")
+        normalized[key] = tensor
+    return normalized
+
+
+def _coerce_optional_row_tensor(value: Any) -> torch.Tensor | None:
+    if isinstance(value, torch.Tensor):
+        tensor = value
+    elif isinstance(value, (list, tuple)):
+        tensor = torch.as_tensor(value)
+    else:
+        return None
+    if tensor.ndim == 1:
+        return tensor.unsqueeze(0)
+    if tensor.ndim == 2 and tensor.shape[0] == 1:
+        return tensor
+    raise ValueError("Additional request tensors must be shape [seq] or [1, seq].")
 
 
 def _encode_text_request(

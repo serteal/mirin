@@ -5,8 +5,8 @@ from __future__ import annotations
 import torch
 
 import mirin as ti
-from mirin.server.plans import compile_plan
-from mirin.server.scheduler import (
+from mirin.runtime.plans import compile_plan
+from mirin.runtime.scheduler import (
     QueueMetrics,
     bucket_length,
     chunk_sessions_by_decode_budget,

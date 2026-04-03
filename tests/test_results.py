@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from mirin.server.results import PlanResult
+from mirin.runtime.results import PlanResult
 
 
 def test_plan_result_defaults_are_empty_and_mutable() -> None:

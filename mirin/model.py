@@ -13,7 +13,7 @@ import torch.nn as nn
 from .context import get_debug, get_graph_path
 from .counters import Counters
 from .debug import log_call_start, log_model_ready, log_timing, render_intervention_graph
-from .executors import _LocalExecutor, _RemoteExecutor
+from .executors import _LocalExecutor
 from .hooks import HookState, MapFn, _EarlyStop, install_hooks
 from .output import GenerateOutput, Output, generate_output_from_value, merge_generate_outputs
 from .requests import (
@@ -115,26 +115,12 @@ class Model:
 
     def __init__(
         self,
-        wrapped: nn.Module | str | object,
+        wrapped: nn.Module | str,
         *,
         rename: Mapping[str, str] | None = None,
         tokenizer: Any | None = None,
         **load_kwargs: Any,
     ) -> None:
-        if _is_server_instance(wrapped):
-            raise TypeError(
-                "ti.Model(server) was removed. Start the server with "
-                '`server.serve(...)` and connect with `ti.Model("unix:///path.sock")`.'
-            )
-        if isinstance(wrapped, str) and _is_remote_endpoint(wrapped):
-            if rename is not None or tokenizer is not None or load_kwargs:
-                raise TypeError(
-                    "Remote ti.Model(...) does not accept rename=, tokenizer=, or loading kwargs."
-                )
-            self.tokenizer = None
-            self._normalize_requests_locally = False
-            self._executor = _RemoteExecutor(_endpoint_path(wrapped))
-            return
         if isinstance(wrapped, str):
             self.wrapped = _load_model(wrapped, **load_kwargs)
             if not isinstance(self.wrapped, nn.Module):
@@ -150,8 +136,7 @@ class Model:
                 )
             if not isinstance(wrapped, nn.Module):
                 raise TypeError(
-                    "ti.Model(...) expects a torch.nn.Module, a model name/path, "
-                    "or a unix:// endpoint."
+                    "mirin.Model(...) expects a torch.nn.Module or a model name/path."
                 )
             self.wrapped = wrapped
             self.tokenizer = (
@@ -186,6 +171,13 @@ class Model:
     @property
     def capabilities(self) -> dict[str, Any]:
         return dict(self._executor.capabilities)
+
+    @property
+    def capacity(self) -> dict[str, Any]:
+        return dict(self._executor.capacity)
+
+    def stats(self) -> dict[str, Any]:
+        return dict(self._executor.stats())
 
     def __call__(
         self,
@@ -255,19 +247,46 @@ class Model:
 
     def collect(
         self,
-        requests: Sequence[Any] | Any,
+        data: Any,
         *,
         get: Sequence[_ModuleProxy] | _ModuleProxy | None = None,
         map: dict[_ModuleProxy, MapFn] | None = None,
+        out: str | Any | None = None,
+        process: Any | None = None,
+        max_items: int | None = None,
+        max_tokens: int | None = None,
+        sort: bool = True,
         stop_at_last_get: bool = True,
         **kwargs: Any,
-    ) -> list[Any]:
-        """Collect activations over a request list using the local model API."""
+    ) -> Any:
+        """Collect activations from one unit or stream a dataset.
+
+        ``data`` can be:
+
+        - one request item
+        - a sequence of request items
+        - one padded batch mapping like ``{"input_ids": [B, S], ...}``
+        - an iterable dataset of request items or padded batch mappings
+
+        ``out`` controls where activations land:
+
+        - ``None`` / ``"gpu"`` keeps them on the runtime device
+        - ``"cpu"`` materializes them on CPU
+        - ``PATH`` streams them to mmap-backed files and returns an export manifest
+
+        Local models also accept ``process=fn`` for streamed datasets. ``fn`` receives
+        a batched ``CollectStep`` with ``activations``, ``batch``, ``rows``, and ``indices``.
+        """
 
         return self._executor.collect(
-            requests=requests,
+            data=data,
             get=get,
             mapping=map,
+            out=out,
+            process=process,
+            max_items=max_items,
+            max_tokens=max_tokens,
+            sort=sort,
             stop_at_last_get=stop_at_last_get,
             kwargs=dict(kwargs),
         )
@@ -523,31 +542,14 @@ def _filter_model_kwargs(model: nn.Module, kwargs: Mapping[str, Any]) -> dict[st
     allowed = set(signature.parameters)
     return {key: value for key, value in kwargs.items() if key in allowed}
 
-
-def _endpoint_path(path: str) -> str:
-    return path[len("unix://") :]
-
-
-def _is_remote_endpoint(path: str) -> bool:
-    return path.startswith("unix://")
-
-
-def _is_server_instance(value: object) -> bool:
-    try:
-        from .server.inference import Server
-    except Exception:
-        return False
-    return isinstance(value, Server)
-
-
 def _load_model(name_or_path: str, **load_kwargs: Any) -> nn.Module:
     try:
         from transformers import AutoModelForCausalLM
     except ImportError as exc:
         raise ImportError(
-            f'ti.Model("{name_or_path}") requires `transformers` to load models by name.\n'
+            f'mirin.Model("{name_or_path}") requires `transformers` to load models by name.\n'
             "Install with: pip install mirin[transformers]\n"
-            "Or pass an already-loaded model: ti.Model(your_model)"
+            "Or pass an already-loaded model: mirin.Model(your_model)"
         ) from exc
 
     return AutoModelForCausalLM.from_pretrained(name_or_path, **load_kwargs)

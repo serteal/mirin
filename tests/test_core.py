@@ -656,7 +656,6 @@ def test_local_capabilities_report_grad_support() -> None:
     model = ti.Model(FakeDecoderModel(), tokenizer=FakeTokenizer())
 
     assert model.capabilities["backend"] == "local"
-    assert model.capabilities["remote"] is False
     assert model.capabilities["grad"] is True
     assert model.capabilities["request_tokenization"] is True
 

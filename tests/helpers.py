@@ -23,7 +23,7 @@ class FakeOutput:
 
 
 class FakeTokenizer:
-    """Tiny tokenizer with text and chat-template support for server tests."""
+    """Tiny tokenizer with text and chat-template support for model tests."""
 
     pad_token_id = 0
     eos_token_id = 2

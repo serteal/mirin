@@ -4,7 +4,8 @@ version = "0.1.0"
 description = "Minimal activation access and intervention wrapper for PyTorch models."
 requires-python = ">=3.11"
 dependencies = [
-    "torch>=2.0",
+    "numpy>=1.26",
+    "torch>=2.6,<2.7",
 ]
 
 [project.optional-dependencies]
@@ -31,11 +32,21 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["mirin", "mirin.server"]
+packages = ["mirin", "mirin.runtime"]
 include-package-data = true
 
 [tool.setuptools.package-data]
 mirin = ["py.typed"]
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cu124", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu124"
+url = "https://download.pytorch.org/whl/cu124"
+explicit = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -61,7 +72,6 @@ select = ["A", "B", "E", "F", "I", "UP"]
 
 [tool.ruff.lint.per-file-ignores]
 "mirin/model.py" = ["A002"]
-"mirin/server/remote.py" = ["A002", "E701"]
 
 [tool.mypy]
 python_version = "3.11"

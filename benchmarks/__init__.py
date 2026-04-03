@@ -1,1 +1,1 @@
-"""Benchmark helpers for mirin."""
+"""Repo-local benchmarking helpers for mirin."""

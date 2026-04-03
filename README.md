@@ -1,13 +1,14 @@
-# tinyinterp
+# mirin
 
 Small activation access and intervention wrapper for PyTorch models.
 
 Navigate real module paths, not a separate site tree:
 
 ```python
-import tinyinterp as ti
+import torch
+import mirin as mi
 
-model = ti.Model(hf_model, rename=ti.renames.llm)
+model = mi.Model(hf_model, rename=mi.renames.llm)
 out = model(**inputs, get=[model.model.layers[5].self_attn])
 acts = out[model.model.layers[5].self_attn]
 
@@ -18,6 +19,38 @@ capture = model(
     stop_at_last_get=True,
 )
 acts = capture[model.model.layers[5].self_attn]
+```
+
+Collect activations with one entrypoint:
+
+```python
+site = model.model.layers[5]
+
+# One-shot collection.
+outs = model.collect(["hello", "world"], get=[site])
+acts = outs[0][site]
+
+# Stream a dataset batch by batch.
+for step in model.collect(dataset, get=[site], out="gpu", max_tokens=4096):
+    mask = step.batch["attention_mask"]
+    acts = step[site]
+    pooled = (acts * mask.to(acts.device, dtype=acts.dtype).unsqueeze(-1)).sum(dim=1)
+    pooled = pooled / mask.sum(dim=1, keepdim=True).clamp(min=1).to(acts.device, dtype=acts.dtype)
+    step.release()
+
+# Let mirin handle the loop and run a local postprocess on each step.
+def pool_mean(step):
+    mask = step.batch["attention_mask"]
+    acts = step[site]
+    pooled = (acts * mask.to(acts.device, dtype=acts.dtype).unsqueeze(-1)).sum(dim=1)
+    pooled = pooled / mask.sum(dim=1, keepdim=True).clamp(min=1).to(acts.device, dtype=acts.dtype)
+    return pooled.cpu()
+
+for pooled in model.collect(dataset, get=[site], out="gpu", process=pool_mean, max_tokens=4096):
+    train_probe(pooled)
+
+# Stream a huge export to disk.
+manifest = model.collect(dataset, get=[site], out="acts/")
 ```
 
 ## Setup
@@ -34,38 +67,12 @@ To include optional model-loading support:
 uv sync --python 3.11 --extra transformers
 ```
 
-## Server Mode
+## Runtime Stats
 
 ```python
-import tinyinterp as ti
+import mirin as mi
 
-server = ti.Server(hf_model)
-plan = server.compile(
-    get=["model.layers.5.self_attn"],
-    output={"logits": False, "activations": True},
-)
-
-collector = server.open_collector(plan=plan, stop_at_last_get=True)
-batch_out = collector.collect_batch(inputs)
-acts = batch_out.activations["model.layers.5.self_attn"]
-many_out = collector.collect_many(
-    [
-        {"input_ids": inputs["input_ids"][0]},
-        {"input_ids": inputs["input_ids"][0]},
-    ]
-)
-
-session = server.open_session(plan=plan, cache="dynamic")
-prefill = server.prefill(session, **inputs)
-step = server.decode([session], max_new_tokens=1)[0]
-
-batched = server.generate_many(
-    [
-        [{"role": "user", "content": "Summarize attention heads."}],
-        [{"role": "user", "content": "List safety caveats."}],
-    ],
-    max_new_tokens=32,
-)
-
-stats = server.stats()
+model = mi.Model(hf_model)
+capacity = model.capacity
+stats = model.stats()
 ```
