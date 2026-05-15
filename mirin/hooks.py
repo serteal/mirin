@@ -1,4 +1,15 @@
-"""Permanent hook management for mirin."""
+"""Lazy hook management for mirin.
+
+Hooks are bookkept for every module up front but ``register_forward_hook`` is
+deferred until a site is first requested via ``get=`` or ``map=``. The hook
+then stays installed, so subsequent calls pay no registration cost.
+
+Why: PyTorch dispatches every module's hook list on every forward, and each
+fired hook does at minimum a ``ContextVar.get`` + a set membership check
+before short-circuiting. For an 8B Llama that's ~600 firings per forward.
+During decode you pay this per generated token. Lazy registration shrinks
+the fan-out to the modules the user has actually asked about — usually one.
+"""
 
 from __future__ import annotations
 
@@ -34,19 +45,25 @@ class _CallState:
 
 
 class HookState:
-    """Permanent hooks with per-call capture state stored in a context variable.
+    """Lazy hooks with per-call capture state stored in a context variable.
+
+    Bookkeeping (sid assignment, path list, module handle) happens up front
+    for every module, but ``register_forward_hook`` is deferred until the
+    site is first requested via ``activate``. Once installed, the hook stays
+    installed for the lifetime of the model so repeat calls are cheap.
 
     Hook capture follows the current execution context. This supports overlapping
     calls in one process, but forwards that dispatch hooked module execution onto
     other threads are intentionally unsupported.
     """
 
-    __slots__ = ("_id_map", "_paths", "_handles", "_current")
+    __slots__ = ("_id_map", "_paths", "_modules", "_handles", "_current")
 
     def __init__(self) -> None:
         self._id_map: dict[int, int] = {}
         self._paths: list[str] = []
-        self._handles: list[RemovableHandle] = []
+        self._modules: list[nn.Module] = []
+        self._handles: dict[int, RemovableHandle] = {}
         self._current: ContextVar[_CallState | None] = ContextVar(
             "mirin_hook_state", default=None
         )
@@ -54,6 +71,11 @@ class HookState:
     @property
     def n_modules(self) -> int:
         return len(self._paths)
+
+    @property
+    def n_active_hooks(self) -> int:
+        """Number of modules currently carrying a forward hook."""
+        return len(self._handles)
 
     @property
     def id_map(self) -> dict[int, int]:
@@ -64,13 +86,24 @@ class HookState:
         return {path: sid for sid, path in enumerate(self._paths)}
 
     def register(self, module: nn.Module, path: str) -> None:
+        """Bookkeep this module so ``sid_for`` works later. The actual forward
+        hook is installed lazily in :meth:`activate` the first time the site
+        is requested.
+        """
         sid = len(self._paths)
         self._id_map[id(module)] = sid
         self._paths.append(path)
-        self._handles.append(module.register_forward_hook(self._make_hook(path, sid)))
+        self._modules.append(module)
 
     def sid_for(self, module: nn.Module) -> int:
         return self._id_map[id(module)]
+
+    def _ensure_hook(self, sid: int) -> None:
+        if sid in self._handles:
+            return
+        module = self._modules[sid]
+        path = self._paths[sid]
+        self._handles[sid] = module.register_forward_hook(self._make_hook(path, sid))
 
     def activate(
         self,
@@ -81,9 +114,14 @@ class HookState:
         stop_at_last_get: bool = False,
     ) -> Token[_CallState | None]:
         get_sids = {self.sid_for(proxy._module) for proxy in get_proxies}
+        map_sids = {self.sid_for(proxy._module): fn for proxy, fn in map_dict.items()}
+        for sid in get_sids:
+            self._ensure_hook(sid)
+        for sid in map_sids:
+            self._ensure_hook(sid)
         state = _CallState(
             get_sids=get_sids,
-            map_fns={self.sid_for(proxy._module): fn for proxy, fn in map_dict.items()},
+            map_fns=map_sids,
             grad=grad,
             stop_enabled=stop_at_last_get and bool(get_sids),
             remaining_gets=len(get_sids),
@@ -163,7 +201,10 @@ class HookState:
 
 
 def install_hooks(model: nn.Module) -> HookState:
-    """Install permanent forward hooks on every module in the tree."""
+    """Bookkeep every module in the tree. Forward hooks are not installed
+    here; ``HookState.activate`` installs them lazily on first use of each
+    site, then keeps them installed for the model's lifetime.
+    """
 
     state = HookState()
     for path, module in model.named_modules():

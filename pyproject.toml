@@ -5,7 +5,7 @@ description = "Minimal activation access and intervention wrapper for PyTorch mo
 requires-python = ">=3.11"
 dependencies = [
     "numpy>=1.26",
-    "torch>=2.6,<2.7",
+    "torch>=2.6",
 ]
 
 [project.optional-dependencies]
@@ -14,11 +14,6 @@ transformers = [
 ]
 
 [dependency-groups]
-bench = [
-    "nnterp>=1.3.0",
-    "transformers>=4.30",
-    "transformer-lens>=2.16.1",
-]
 dev = [
     "mypy>=1.6",
     "pre-commit>=3.5",
@@ -37,16 +32,6 @@ include-package-data = true
 
 [tool.setuptools.package-data]
 mirin = ["py.typed"]
-
-[tool.uv.sources]
-torch = [
-    { index = "pytorch-cu124", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
-]
-
-[[tool.uv.index]]
-name = "pytorch-cu124"
-url = "https://download.pytorch.org/whl/cu124"
-explicit = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

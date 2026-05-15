@@ -275,16 +275,21 @@ def estimate_admission(
     plan: CompiledPlan,
     dtype: torch.dtype,
     batch_size: int,
-    prompt_tokens: int,
-    projected_decode_tokens: int,
+    prompt_tokens_per_request: int,
+    decode_tokens_per_request: int,
     bucket_multiple: int,
     max_kv_cache_bytes: int | None,
     max_activation_capture_bytes: int | None,
 ) -> AdmissionEstimate:
-    """Produce a conservative request-size estimate for early rejection."""
+    """Estimate the bytes a request will allocate.
 
-    total_tokens = prompt_tokens + projected_decode_tokens
-    bucket_tokens = bucket_length(total_tokens, bucket_multiple)
+    ``prompt_tokens_per_request`` and ``decode_tokens_per_request`` are
+    per-request counts (not batched sums). KV-cache reservation in HF's
+    contiguous cache layout is ``batch_size * max_seq_len_per_request``.
+    """
+
+    per_request_total = prompt_tokens_per_request + decode_tokens_per_request
+    bucket_tokens = bucket_length(per_request_total, bucket_multiple)
     kv_cache_bytes = estimate_kv_cache_bytes(
         wrapped,
         dtype=dtype,
@@ -296,7 +301,7 @@ def estimate_admission(
         plan=plan,
         dtype=dtype,
         batch_size=batch_size,
-        seq_len=max(prompt_tokens, 1),
+        seq_len=max(prompt_tokens_per_request, 1),
     )
 
     admitted = True
@@ -312,8 +317,8 @@ def estimate_admission(
 
     return AdmissionEstimate(
         queue=queue,
-        prompt_tokens=prompt_tokens,
-        projected_decode_tokens=projected_decode_tokens,
+        prompt_tokens=prompt_tokens_per_request,
+        projected_decode_tokens=decode_tokens_per_request,
         batch_size=batch_size,
         bucket_tokens=bucket_tokens,
         kv_cache_bytes=kv_cache_bytes,

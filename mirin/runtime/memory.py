@@ -216,13 +216,13 @@ class RuntimeCapacity:
             wrapped,
             device=device,
         )
-        default_cap = device_capacity_bytes if device_capacity_bytes > 0 else None
-        kv_cache_bytes = max_kv_cache_bytes if max_kv_cache_bytes is not None else default_cap
-        activation_capture_bytes = (
-            max_activation_capture_bytes
-            if max_activation_capture_bytes is not None
-            else default_cap
-        )
+        # Admission control is opt-in. The previous defaults (device-capacity-
+        # times-fraction) plus a buggy estimate caused false rejections on
+        # batches that fit comfortably. If the workload genuinely doesn't fit,
+        # CUDA OOM gives a precise message anyway. Setting these to None makes
+        # ``try_reserve`` skip the rejection path entirely.
+        kv_cache_bytes = max_kv_cache_bytes
+        activation_capture_bytes = max_activation_capture_bytes
         spill_bytes = cpu_capacity_bytes if cpu_capacity_bytes > 0 else None
         max_prefill_tokens = (
             prefill_token_budget

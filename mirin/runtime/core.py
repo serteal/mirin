@@ -498,8 +498,8 @@ class _RuntimeCore:
         plan: CompiledPlan,
         *,
         batch_size: int,
-        prompt_tokens: int,
-        projected_decode_tokens: int,
+        prompt_tokens_per_request: int,
+        decode_tokens_per_request: int,
     ) -> AdmissionEstimate:
         return estimate_admission(
             queue=queue,
@@ -507,8 +507,8 @@ class _RuntimeCore:
             plan=plan,
             dtype=model_dtype(self._model.wrapped),
             batch_size=batch_size,
-            prompt_tokens=prompt_tokens,
-            projected_decode_tokens=projected_decode_tokens,
+            prompt_tokens_per_request=prompt_tokens_per_request,
+            decode_tokens_per_request=decode_tokens_per_request,
             bucket_multiple=self._scheduler.decode_bucket_multiple,
             max_kv_cache_bytes=self._scheduler.max_kv_cache_bytes,
             max_activation_capture_bytes=self._scheduler.max_activation_capture_bytes,
@@ -522,14 +522,20 @@ class _RuntimeCore:
         activation_budget_bytes: int | None = None,
     ) -> AdmissionEstimate:
         activation_cap = activation_budget_bytes or self._scheduler.max_activation_capture_bytes
+        batch_size = _batch_size_from_mapping(batch)
+        prompt_tokens_total = prompt_tokens_from_mapping(batch)
+        # Per-request token count for KV reservation. With padded contiguous
+        # batches, KV reserves max_seq_len per request; use the average as a
+        # cheap proxy.
+        per_request = prompt_tokens_total // max(batch_size, 1)
         return estimate_admission(
             queue="collect_batch",
             wrapped=self._model.wrapped,
             plan=plan,
             dtype=model_dtype(self._model.wrapped),
-            batch_size=_batch_size_from_mapping(batch),
-            prompt_tokens=prompt_tokens_from_mapping(batch),
-            projected_decode_tokens=0,
+            batch_size=batch_size,
+            prompt_tokens_per_request=per_request,
+            decode_tokens_per_request=0,
             bucket_multiple=self._scheduler.decode_bucket_multiple,
             max_kv_cache_bytes=self._scheduler.max_kv_cache_bytes,
             max_activation_capture_bytes=activation_cap,
@@ -626,13 +632,14 @@ class _RuntimeCore:
         args: tuple[Any, ...],
         kwargs: Mapping[str, Any],
     ) -> AdmissionEstimate:
-        batch_size, prompt_tokens = _batch_metrics_from_call(args, kwargs)
+        batch_size, prompt_tokens_total = _batch_metrics_from_call(args, kwargs)
+        per_request = prompt_tokens_total // max(batch_size, 1)
         return self._estimate_request(
             "call",
             plan,
             batch_size=batch_size,
-            prompt_tokens=prompt_tokens,
-            projected_decode_tokens=0,
+            prompt_tokens_per_request=per_request,
+            decode_tokens_per_request=0,
         )
 
     def _estimate_generate(
@@ -644,13 +651,16 @@ class _RuntimeCore:
         max_new_tokens: int,
     ) -> AdmissionEstimate:
         batch_size = int(input_ids.shape[0]) if input_ids.ndim >= 2 else 1
-        prompt_tokens = int(attention_mask.sum().item())
+        # Per-request prompt tokens. With padded contiguous KV cache we'll
+        # reserve max_seq_len per request, so use the longest prompt in the
+        # batch (worst case) for the estimate.
+        per_request_prompt = int(attention_mask.sum(dim=-1).max().item())
         return self._estimate_request(
             "generate",
             plan,
             batch_size=batch_size,
-            prompt_tokens=prompt_tokens,
-            projected_decode_tokens=max_new_tokens * batch_size,
+            prompt_tokens_per_request=per_request_prompt,
+            decode_tokens_per_request=max_new_tokens,
         )
 
     def _auto_chunk_batch(
@@ -974,11 +984,22 @@ class _RuntimeCore:
                     "prompt_width": prompt_width,
                 },
             )
-        estimate = self._estimate_generate(
-            plan,
-            input_ids=batch_input_ids,
-            attention_mask=batch_attention,
-            max_new_tokens=max_new_tokens,
+        # Tier-1 fast path: only run admission estimation when at least one
+        # budget is set. The estimate itself does an attention_mask.sum().item()
+        # CUDA sync; with admission off (the default) we can skip it entirely.
+        admission_active = (
+            self._scheduler.max_kv_cache_bytes is not None
+            or self._scheduler.max_activation_capture_bytes is not None
+        )
+        estimate = (
+            self._estimate_generate(
+                plan,
+                input_ids=batch_input_ids,
+                attention_mask=batch_attention,
+                max_new_tokens=max_new_tokens,
+            )
+            if admission_active
+            else None
         )
         prompt_attention = batch_attention.clone()
         extra_kwargs = cast(dict[str, Any], move_tensors_to(dict(kwargs), device))
@@ -987,9 +1008,28 @@ class _RuntimeCore:
         if requested_use_cache is not None:
             use_cache = use_cache and bool(requested_use_cache)
         eos_ids = eos_token_ids(self._model.wrapped)
+        # Build a device-resident eos tensor once so the per-step EOS check
+        # can be a vectorised compare instead of B `.item()` syncs per step.
+        eos_tensor = (
+            torch.tensor(sorted(eos_ids), dtype=batch_input_ids.dtype, device=device)
+            if eos_ids
+            else None
+        )
         requested_pad_token_id = extra_kwargs.pop("pad_token_id", None)
         pad_token_id = self._pad_token_id() if requested_pad_token_id is None else int(requested_pad_token_id)
         batch_size = int(batch_input_ids.shape[0])
+        # Pre-allocate the attention mask for the full prompt + decode horizon
+        # so the per-step grow is a slice instead of a torch.cat reallocation.
+        prompt_len = int(batch_attention.shape[-1])
+        total_len = prompt_len + max_new_tokens
+        mask_buffer = batch_attention.new_empty((batch_size, total_len))
+        mask_buffer[:, :prompt_len].copy_(batch_attention)
+        if max_new_tokens > 0:
+            mask_buffer[:, prompt_len:].fill_(1)
+        # CPU-side cumulative context-token counter so we don't sync each
+        # step just to record `batch_attention.sum().item()` for telemetry.
+        prompt_token_total = int(prompt_attention.sum().item())
+        context_tokens_cum = prompt_token_total
         generated_steps: list[torch.Tensor] = []
         generated_activations: dict[str, list[torch.Tensor]] = {}
         prompt_activations: dict[str, Any] = {}
@@ -997,7 +1037,7 @@ class _RuntimeCore:
             "generate",
             estimate=estimate,
             batch_size=batch_size,
-            batch_tokens=int(batch_attention.sum().item()),
+            batch_tokens=prompt_token_total,
         ):
             with torch.inference_mode():
                 prepared = {
@@ -1014,7 +1054,7 @@ class _RuntimeCore:
                     "generate",
                     batch_size=batch_size,
                     batch_tokens=int(batch_input_ids.numel()),
-                    context_tokens=int(batch_attention.sum().item()),
+                    context_tokens=context_tokens_cum,
                 )
                 if plan.output.activations:
                     prompt_activations = self._extract_activations(plan, output)
@@ -1036,22 +1076,25 @@ class _RuntimeCore:
                         filler = torch.full_like(next_token, pad_token_id)
                         next_token = torch.where(finished.unsqueeze(-1), filler, next_token)
                     generated_steps.append(next_token)
-                    if eos_ids:
-                        for idx in range(batch_size):
-                            if not bool(finished[idx]) and contains_eos(next_token[idx : idx + 1], eos_ids):
-                                finished[idx] = True
+                    if eos_tensor is not None:
+                        # Vectorised EOS detection: no .item() syncs per request.
+                        last_tok = next_token[:, 0] if next_token.ndim > 1 else next_token
+                        is_eos = (last_tok.unsqueeze(-1) == eos_tensor).any(dim=-1)
+                        finished = finished | is_eos
                     needs_trailing_forward = plan.output.activations
                     if step_idx == max_new_tokens - 1 and not needs_trailing_forward:
                         break
-                    if bool(finished.all()) and not needs_trailing_forward:
+                    # When we're not extracting activations, we can break
+                    # once every sequence has emitted EOS. That requires a
+                    # bool(finished.all()) sync; avoid it on the activation-
+                    # extraction hot path where we always run the full loop.
+                    if not needs_trailing_forward and bool(finished.all()):
                         break
-                    batch_attention = torch.cat(
-                        [
-                            batch_attention,
-                            torch.ones((batch_size, 1), dtype=batch_attention.dtype, device=device),
-                        ],
-                        dim=-1,
-                    )
+                    # Slice the pre-allocated mask buffer instead of cat.
+                    # `.contiguous()` ensures the kernel doesn't fall back to a
+                    # strided-mask path; the copy is small (B * cur_len bytes).
+                    batch_attention = mask_buffer[:, : prompt_len + step_idx + 1].contiguous()
+                    context_tokens_cum += batch_size
                     if use_cache:
                         prepared = _prepare_inputs_for_generation(
                             self._model.wrapped,
@@ -1075,7 +1118,7 @@ class _RuntimeCore:
                         "generate",
                         batch_size=batch_size,
                         batch_tokens=int(next_token.numel()) if use_cache else int(full_tokens.numel()),
-                        context_tokens=int(batch_attention.sum().item()),
+                        context_tokens=context_tokens_cum,
                     )
                     if plan.output.activations:
                         for path, value in self._extract_activations(plan, output).items():
@@ -1086,7 +1129,9 @@ class _RuntimeCore:
                         "past_key_values",
                         cache,
                     )
-                    if step_idx == max_new_tokens - 1 or bool(finished.all()):
+                    if step_idx == max_new_tokens - 1:
+                        break
+                    if not needs_trailing_forward and bool(finished.all()):
                         break
                     logits = extract_last_token_logits(output)
         generated = (
