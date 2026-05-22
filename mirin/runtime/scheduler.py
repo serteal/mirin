@@ -280,6 +280,7 @@ def estimate_admission(
     bucket_multiple: int,
     max_kv_cache_bytes: int | None,
     max_activation_capture_bytes: int | None,
+    include_kv_cache: bool = True,
 ) -> AdmissionEstimate:
     """Estimate the bytes a request will allocate.
 
@@ -290,11 +291,15 @@ def estimate_admission(
 
     per_request_total = prompt_tokens_per_request + decode_tokens_per_request
     bucket_tokens = bucket_length(per_request_total, bucket_multiple)
-    kv_cache_bytes = estimate_kv_cache_bytes(
-        wrapped,
-        dtype=dtype,
-        batch_size=batch_size,
-        total_tokens=bucket_tokens,
+    kv_cache_bytes = (
+        estimate_kv_cache_bytes(
+            wrapped,
+            dtype=dtype,
+            batch_size=batch_size,
+            total_tokens=bucket_tokens,
+        )
+        if include_kv_cache
+        else 0
     )
     activation_bytes = estimate_activation_bytes(
         wrapped,

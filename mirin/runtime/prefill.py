@@ -39,7 +39,7 @@ def collect_batch(
             produced_chunks=len(chunks),
         )
         return _concat_batch_results([collect_batch(runtime, collector, chunk) for chunk in chunks])
-    budget_chunks = runtime._auto_chunk_batch(collector.plan, batch)
+    budget_chunks = runtime._auto_chunk_batch(collector.plan, batch, use_cache=collector.use_cache)
     if budget_chunks is not None:
         runtime._record_split(
             "collect_batch",
@@ -54,6 +54,7 @@ def collect_batch(
         collector.plan,
         batch=batch,
         activation_budget_bytes=collector.activation_budget_bytes,
+        use_cache=collector.use_cache,
     )
     with runtime._scheduled(
         "collect_batch",

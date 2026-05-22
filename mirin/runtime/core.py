@@ -44,7 +44,6 @@ from .util import (
     gpu_stats,
     model_dtype,
     move_tensors_to,
-    prompt_tokens_from_mapping,
     to_cpu,
     to_cpu_dict,
 )
@@ -500,6 +499,7 @@ class _RuntimeCore:
         batch_size: int,
         prompt_tokens_per_request: int,
         decode_tokens_per_request: int,
+        include_kv_cache: bool = True,
     ) -> AdmissionEstimate:
         return estimate_admission(
             queue=queue,
@@ -512,6 +512,7 @@ class _RuntimeCore:
             bucket_multiple=self._scheduler.decode_bucket_multiple,
             max_kv_cache_bytes=self._scheduler.max_kv_cache_bytes,
             max_activation_capture_bytes=self._scheduler.max_activation_capture_bytes,
+            include_kv_cache=include_kv_cache,
         )
 
     def _estimate_collection(
@@ -520,6 +521,7 @@ class _RuntimeCore:
         *,
         batch: Mapping[str, Any],
         activation_budget_bytes: int | None = None,
+        use_cache: bool = False,
     ) -> AdmissionEstimate:
         activation_cap = activation_budget_bytes or self._scheduler.max_activation_capture_bytes
         batch_size = _batch_size_from_mapping(batch)
@@ -539,6 +541,7 @@ class _RuntimeCore:
             bucket_multiple=self._scheduler.decode_bucket_multiple,
             max_kv_cache_bytes=self._scheduler.max_kv_cache_bytes,
             max_activation_capture_bytes=activation_cap,
+            include_kv_cache=use_cache,
         )
 
     @contextmanager
@@ -667,6 +670,8 @@ class _RuntimeCore:
         self,
         plan: CompiledPlan,
         batch: Mapping[str, Any],
+        *,
+        use_cache: bool = True,
     ) -> list[dict[str, Any]] | None:
         input_ids = batch.get("input_ids")
         if not isinstance(input_ids, torch.Tensor) or input_ids.ndim < 2:
@@ -677,6 +682,7 @@ class _RuntimeCore:
             plan,
             seq_len=int(input_ids.shape[-1]),
             bucket_multiple=self._scheduler.decode_bucket_multiple,
+            include_kv_cache=use_cache,
         )
         if max_batch >= int(input_ids.shape[0]):
             return None
@@ -1515,6 +1521,48 @@ def _batch_size_from_mapping(batch: Mapping[str, Any]) -> int:
     if isinstance(input_ids, torch.Tensor) and input_ids.ndim >= 1:
         return int(input_ids.shape[0])
     return 1
+
+
+def _sequence_length_from_mapping(batch: Mapping[str, Any]) -> int:
+    input_ids = batch.get("input_ids")
+    if isinstance(input_ids, torch.Tensor):
+        if input_ids.ndim >= 2:
+            return int(input_ids.shape[-1])
+        if input_ids.ndim == 1:
+            return int(input_ids.shape[0])
+    return 0
+
+
+def _batch_size_from_call(args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> int:
+    input_ids = kwargs.get("input_ids")
+    if isinstance(input_ids, torch.Tensor):
+        if input_ids.ndim >= 2:
+            return int(input_ids.shape[0])
+        if input_ids.ndim == 1:
+            return 1
+    if args and isinstance(args[0], torch.Tensor):
+        tensor = cast(torch.Tensor, args[0])
+        if tensor.ndim >= 2:
+            return int(tensor.shape[0])
+        if tensor.ndim == 1:
+            return 1
+    return 1
+
+
+def _sequence_length_from_call(args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> int:
+    input_ids = kwargs.get("input_ids")
+    if isinstance(input_ids, torch.Tensor):
+        if input_ids.ndim >= 2:
+            return int(input_ids.shape[-1])
+        if input_ids.ndim == 1:
+            return int(input_ids.shape[0])
+    if args and isinstance(args[0], torch.Tensor):
+        tensor = cast(torch.Tensor, args[0])
+        if tensor.ndim >= 2:
+            return int(tensor.shape[-1])
+        if tensor.ndim == 1:
+            return int(tensor.shape[0])
+    return 0
 
 
 def _batch_metrics_from_call(

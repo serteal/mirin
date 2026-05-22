@@ -349,6 +349,7 @@ class RuntimeCapacity:
         seq_len: int,
         *,
         bucket_multiple: int = 64,
+        include_kv_cache: bool = True,
     ) -> int:
         """Max batch size that fits within the derived device capacity."""
 
@@ -364,11 +365,15 @@ class RuntimeCapacity:
             batch_size=1,
             seq_len=max(seq_len, 1),
         )
-        kv_bytes = estimate_kv_cache_bytes(
-            self.wrapped,
-            dtype=dtype,
-            batch_size=1,
-            total_tokens=bucket_tokens,
+        kv_bytes = (
+            estimate_kv_cache_bytes(
+                self.wrapped,
+                dtype=dtype,
+                batch_size=1,
+                total_tokens=bucket_tokens,
+            )
+            if include_kv_cache
+            else 0
         )
         per_example = max(forward_bytes, capture_bytes + kv_bytes, 1)
         return max(self.device_capacity_bytes // per_example, 1)
