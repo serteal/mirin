@@ -44,6 +44,7 @@ from .util import (
     gpu_stats,
     model_dtype,
     move_tensors_to,
+    prompt_tokens_from_mapping,
     to_cpu,
     to_cpu_dict,
 )

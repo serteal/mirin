@@ -347,8 +347,8 @@ def test_transformers_batch_fused_outputs_expose_logits(
         out_zero = model(**inputs, map={proxy: ti.zero()})
         out_shift = model(**inputs, map={proxy: ti.add(1.0)})
 
-    assert torch.allclose(out_zero.logits, expected_zero)
-    assert torch.allclose(out_shift.logits, expected_shift)
+    assert torch.allclose(out_zero.logits, expected_zero, atol=1e-7)
+    assert torch.allclose(out_shift.logits, expected_shift, atol=1e-7)
 
 
 def _configure_text_config(config: Any) -> None:

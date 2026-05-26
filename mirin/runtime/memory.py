@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Any
 
@@ -39,6 +40,19 @@ def _proc_meminfo_bytes(field: str) -> int:
     return 0
 
 
+def _sysconf_memory_bytes(field: str) -> int:
+    """Detect memory with POSIX sysconf when Linux procfs is unavailable."""
+
+    try:
+        page_size = int(os.sysconf("SC_PAGE_SIZE"))
+        pages = int(os.sysconf(field))
+    except (AttributeError, OSError, ValueError):
+        return 0
+    if page_size <= 0 or pages <= 0:
+        return 0
+    return page_size * pages
+
+
 def _cpu_memory_bytes() -> int:
     """Detect the effective CPU memory limit, respecting cgroups."""
 
@@ -48,7 +62,9 @@ def _cpu_memory_bytes() -> int:
     if limit is not None:
         return limit
     total = _proc_meminfo_bytes("MemTotal")
-    return total if total > 0 else 0
+    if total > 0:
+        return total
+    return _sysconf_memory_bytes("SC_PHYS_PAGES")
 
 
 def _cpu_available_bytes() -> int:
@@ -62,6 +78,9 @@ def _cpu_available_bytes() -> int:
     available = _proc_meminfo_bytes("MemAvailable")
     if limit is not None and usage is not None:
         available = min(available or limit, max(limit - usage, 0))
+    if available > 0:
+        return available
+    available = _sysconf_memory_bytes("SC_AVPHYS_PAGES")
     if available > 0:
         return available
     total = _cpu_memory_bytes()
